@@ -138,5 +138,26 @@ namespace OrdemServico.Lambda.Tests.Api
 
             response.StatusCode.Should().Be(HttpStatusCode.NoContent);
         }
+
+        [Fact]
+        public async Task SwaggerEndpoint_DeveRetornar200EConterEspecificacaoOpenApi()
+        {
+            HttpResponseMessage response = await Client(role: null).GetAsync("/swagger/v1/swagger.json");
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            string json = await response.Content.ReadAsStringAsync();
+            json.Should().Contain("Ordem de Serviço Microservice");
+            json.Should().Contain("/api/v1/ordens-servico");
+        }
+
+        [Fact]
+        public async Task SwaggerUI_DeveRetornar200OK()
+        {
+            HttpResponseMessage response = await Client(role: null).GetAsync("/swagger/index.html");
+
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            string html = await response.Content.ReadAsStringAsync();
+            html.Should().Contain("swagger-ui");
+        }
     }
 }

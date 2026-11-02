@@ -35,26 +35,34 @@ Um único pacote, com quatro handlers:
 | `CompensacaoEventoFunction` | Assinatura do tópico SNS (filtro por `tipoEvento`) | `OrdemServico.Lambda::OrdemServico.Lambda.Functions.CompensacaoEventoFunction::Handle` |
 | `OutboxPublisherFunction` | DynamoDB Streams (filtro: `tipoEntidade = OUTBOX`) | `OrdemServico.Lambda::OrdemServico.Lambda.Functions.OutboxPublisherFunction::Handle` |
 
-## Endpoints (API Gateway → Lambda)
+## Documentação Interativa (Swagger UI)
 
-Base: `https://<api-id>.execute-api.<região>.amazonaws.com` (output `ApiUrl` da stack).
+O microsserviço disponibiliza a documentação interativa Swagger/OpenAPI v3:
+- **Swagger UI:** [`http://localhost:8083/swagger`](http://localhost:8083/swagger)
+- **JSON OpenAPI:** [`http://localhost:8083/swagger/v1/swagger.json`](http://localhost:8083/swagger/v1/swagger.json)
+- **Autenticação JWT Bearer:** O Swagger UI possui suporte ao esquema Bearer. Basta autenticar na API Core (`POST /api/v1/auth/login`) e informar o token no botão **Authorize**.
 
-| Método | Rota | Auth | Resposta |
+## Endpoints (API Gateway → Lambda / Local K8s & Docker)
+
+Base Local: `http://localhost:8083`  
+Base AWS: `https://<api-id>.execute-api.<região>.amazonaws.com` (output `ApiUrl` da stack).
+
+| Método | Rota | Auth / Perfil | Resposta |
 |---|---|---|---|
 | POST | `/api/v1/ordens-servico` | Administrador | 201 `{ id, clienteNotificado }` |
-| GET | `/api/v1/ordens-servico` | Administrador | 200 `OrdemServicoResponse[]` (sem Finalizadas/Entregues, ordenadas por prioridade) |
-| GET | `/api/v1/ordens-servico/{id}` | Administrador | 200 `OrdemServicoResponse` |
-| GET | `/api/v1/ordens-servico/{id}/progresso` | pública | 200 `OrdemServicoProgressoResponse` |
-| POST | `/api/v1/ordens-servico/{id}/servicos` | Administrador | 200 `OrdemServicoResponse` |
-| POST | `/api/v1/ordens-servico/{id}/pecas-insumos` | Administrador | 200 `OrdemServicoResponse` (**saga**) |
-| PATCH | `/api/v1/ordens-servico/{id}/iniciar-diagnostico` | Administrador | 200 |
-| PATCH | `/api/v1/ordens-servico/{id}/finalizar-diagnostico` | Administrador | 200 |
-| PATCH | `/api/v1/ordens-servico/{id}/aprovar-orcamento?aprovado=true\|false` | pública | 200 |
-| PATCH | `/api/v1/ordens-servico/{id}/confirmar-entrega` | pública | 200 |
-| PATCH | `/api/v1/ordens-servico/{id}/servicos/{idServico}/iniciar` | Administrador | 204 |
-| PATCH | `/api/v1/ordens-servico/{id}/servicos/{idServico}/finalizar` | Administrador | 204 |
-| DELETE | `/api/v1/ordens-servico/{id}/servicos/{idServico}` | Administrador | 204 |
-| DELETE | `/api/v1/ordens-servico/{id}/pecas-insumos/{idPecaInsumo}` | Administrador | 204 |
+| GET | `/api/v1/ordens-servico` | Administrador, Mecanico | 200 `OrdemServicoResponse[]` (sem Finalizadas/Entregues, ordenadas por prioridade) |
+| GET | `/api/v1/ordens-servico/{id}` | Administrador, Mecanico | 200 `OrdemServicoResponse` |
+| GET | `/api/v1/ordens-servico/{id}/progresso` | pública (Cliente) | 200 `OrdemServicoProgressoResponse` |
+| POST | `/api/v1/ordens-servico/{id}/servicos` | Administrador, Mecanico | 200 `OrdemServicoResponse` |
+| POST | `/api/v1/ordens-servico/{id}/pecas-insumos` | Administrador, Mecanico | 200 `OrdemServicoResponse` (**saga**) |
+| PATCH | `/api/v1/ordens-servico/{id}/iniciar-diagnostico` | Administrador, Mecanico | 200 |
+| PATCH | `/api/v1/ordens-servico/{id}/finalizar-diagnostico` | Administrador, Mecanico | 200 |
+| PATCH | `/api/v1/ordens-servico/{id}/aprovar-orcamento?aprovado=true\|false` | pública (Cliente) | 200 |
+| PATCH | `/api/v1/ordens-servico/{id}/confirmar-entrega` | pública (Cliente) | 200 |
+| PATCH | `/api/v1/ordens-servico/{id}/servicos/{idServico}/iniciar` | Administrador, Mecanico | 204 |
+| PATCH | `/api/v1/ordens-servico/{id}/servicos/{idServico}/finalizar` | Administrador, Mecanico | 204 |
+| DELETE | `/api/v1/ordens-servico/{id}/servicos/{idServico}` | Administrador, Mecanico | 204 |
+| DELETE | `/api/v1/ordens-servico/{id}/pecas-insumos/{idPecaInsumo}` | Administrador, Mecanico | 204 |
 | GET | `/api/v1/ordens-servico/health` | pública | 200 |
 
 Erros seguem o contrato do monólito: `{ "statusCode": 400, "message": "...", "traceId": "..." }`.
