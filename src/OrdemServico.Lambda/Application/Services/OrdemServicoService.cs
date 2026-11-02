@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using OrdemServico.Lambda.Application.DTOs.Requests;
 using OrdemServico.Lambda.Application.DTOs.Responses;
@@ -7,6 +8,7 @@ using OrdemServico.Lambda.Application.Saga;
 using OrdemServico.Lambda.Domain.Entities;
 using OrdemServico.Lambda.Domain.Events;
 using OrdemServico.Lambda.Domain.Exceptions;
+using OrdemServico.Lambda.Infrastructure.Messaging;
 
 namespace OrdemServico.Lambda.Application.Services
 {
@@ -34,31 +36,95 @@ namespace OrdemServico.Lambda.Application.Services
     /// cliente/veículo/serviço/peça são lidos da API core e a baixa de estoque passa a ser
     /// um passo da <see cref="ReservaEstoqueSaga"/>, com compensação.
     /// </summary>
-    public class OrdemServicoService(
-        IOrdemServicoRepository ordemServicoRepository,
-        ICatalogoGateway catalogoGateway,
-        ReservaEstoqueSaga reservaEstoqueSaga,
-        IEmailService emailService,
-        ILogger<OrdemServicoService> logger) : IOrdemServicoService
+    public class OrdemServicoService : IOrdemServicoService
     {
-        private readonly IOrdemServicoRepository _ordemServicoRepository = ordemServicoRepository;
-        private readonly ICatalogoGateway _catalogoGateway = catalogoGateway;
-        private readonly ReservaEstoqueSaga _reservaEstoqueSaga = reservaEstoqueSaga;
-        private readonly IEmailService _emailService = emailService;
-        private readonly ILogger<OrdemServicoService> _logger = logger;
+        private readonly IOrdemServicoRepository _ordemServicoRepository;
+        private readonly ICatalogoGateway _catalogoGateway;
+        private readonly ReservaEstoqueSaga _reservaEstoqueSaga;
+        private readonly IEmailService _emailService;
+        private readonly SnsPublisher? _snsPublisher;
+        private readonly ILogger<OrdemServicoService> _logger;
+
+        public OrdemServicoService(
+            IOrdemServicoRepository ordemServicoRepository,
+            ICatalogoGateway catalogoGateway,
+            ReservaEstoqueSaga reservaEstoqueSaga,
+            IEmailService emailService,
+            ILogger<OrdemServicoService> logger)
+            : this(ordemServicoRepository, catalogoGateway, reservaEstoqueSaga, emailService, null, logger)
+        {
+        }
+
+        public OrdemServicoService(
+            IOrdemServicoRepository ordemServicoRepository,
+            ICatalogoGateway catalogoGateway,
+            ReservaEstoqueSaga reservaEstoqueSaga,
+            IEmailService emailService,
+            SnsPublisher? snsPublisher,
+            ILogger<OrdemServicoService> logger)
+        {
+            _ordemServicoRepository = ordemServicoRepository;
+            _catalogoGateway = catalogoGateway;
+            _reservaEstoqueSaga = reservaEstoqueSaga;
+            _emailService = emailService;
+            _snsPublisher = snsPublisher;
+            _logger = logger;
+        }
 
         public async Task<(Guid Id, bool ClienteNotificado)> Criar(OrdemServicoRequest request)
         {
             ClienteResumo cliente = await _catalogoGateway.ObterCliente(request.ClienteId)
                 ?? throw new ClienteNaoEncontradoException(request.ClienteId);
 
-            if (!await _catalogoGateway.VeiculoExiste(request.VeiculoId))
+            VeiculoResumo? veiculo = await _catalogoGateway.ObterVeiculo(request.VeiculoId);
+            bool veiculoExiste = veiculo != null || await _catalogoGateway.VeiculoExiste(request.VeiculoId);
+            if (!veiculoExiste)
                 throw new VeiculoNaoEncontradoException(request.VeiculoId);
 
             Domain.Entities.OrdemServico ordemServico = new(request.ClienteId, request.VeiculoId, cliente.Nome, cliente.Email, request.Observacao);
 
             await _ordemServicoRepository.Adicionar(ordemServico);
             _logger.LogInformation("OS {IdOrdemServico} criada no status {Status}", ordemServico.Id, ordemServico.Status.Codigo);
+
+            if (_snsPublisher != null)
+            {
+                try
+                {
+                    var eventoAberta = new
+                    {
+                        osId = ordemServico.Id,
+                        cliente = new
+                        {
+                            idCliente = cliente.Id,
+                            nome = cliente.Nome,
+                            telefone = cliente.Telefone ?? "11987654321"
+                        },
+                        veiculo = new
+                        {
+                            placa = veiculo?.Placa ?? "SEM-PLACA",
+                            modelo = veiculo?.Modelo ?? "Veiculo",
+                            ano = veiculo?.Ano ?? 2022
+                        },
+                        filialId = "MATRIZ",
+                        observacao = request.Observacao,
+                        eventId = Guid.NewGuid(),
+                        correlationId = ordemServico.Id,
+                        occurredAt = DateTime.UtcNow,
+                        version = 1
+                    };
+
+                    await _snsPublisher.Publicar(new EventoOutbox(
+                        Guid.NewGuid().ToString(),
+                        "OrdemServicoAbertaEvent",
+                        ordemServico.Id.ToString(),
+                        JsonSerializer.Serialize(eventoAberta)));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Falha ao publicar OrdemServicoAbertaEvent no SNS para OS {OsId}", ordemServico.Id);
+                }
+            }
+
             bool notificado = await NotificarMudancaStatusAsync(ordemServico);
 
             return (ordemServico.Id, notificado);
@@ -230,9 +296,46 @@ namespace OrdemServico.Lambda.Application.Services
                 throw new InvalidOperationException("A ordem de serviço precisa estar no status Aguardando aprovação para ser aprovada.");
 
             if (aprovado)
+            {
                 ordemServico.AlterarStatus(StatusOS.OrcamentoAprovado);
+
+                if (_snsPublisher != null)
+                {
+                    try
+                    {
+                        var tarefas = ordemServico.ItensServico.Select(s => new
+                        {
+                            idServicoOrigem = s.IdServico,
+                            descricao = s.Nome,
+                            tempoEstimadoMinutos = s.TempoEstimadoMinutos > 0 ? s.TempoEstimadoMinutos : 60
+                        }).ToList();
+
+                        var eventoLiberada = new
+                        {
+                            osId = ordemServico.Id,
+                            tarefas = tarefas,
+                            eventId = Guid.NewGuid(),
+                            correlationId = ordemServico.Id,
+                            occurredAt = DateTime.UtcNow,
+                            version = 1
+                        };
+
+                        await _snsPublisher.Publicar(new EventoOutbox(
+                            Guid.NewGuid().ToString(),
+                            "OrdemServicoLiberadaParaExecucaoEvent",
+                            ordemServico.Id.ToString(),
+                            JsonSerializer.Serialize(eventoLiberada)));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Falha ao publicar OrdemServicoLiberadaParaExecucaoEvent no SNS para OS {OsId}", ordemServico.Id);
+                    }
+                }
+            }
             else
+            {
                 ordemServico.ReprovarOrcamento(); // publica OrcamentoReprovado → compensação estorna o estoque
+            }
 
             await _ordemServicoRepository.Atualizar(ordemServico);
             bool notificado = await NotificarMudancaStatusAsync(ordemServico);

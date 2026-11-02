@@ -20,12 +20,18 @@ namespace OrdemServico.Lambda.Infrastructure.Http
         public async Task<ClienteResumo?> ObterCliente(Guid idCliente)
         {
             ClienteDto? cliente = await Obter<ClienteDto>($"api/v1/clientes/{idCliente}");
-            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email);
+            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Telefone);
         }
 
         public async Task<bool> VeiculoExiste(Guid idVeiculo)
         {
             return await Obter<VeiculoDto>($"api/v1/veiculos/{idVeiculo}") != null;
+        }
+
+        public async Task<VeiculoResumo?> ObterVeiculo(Guid idVeiculo)
+        {
+            VeiculoDto? veiculo = await Obter<VeiculoDto>($"api/v1/veiculos/{idVeiculo}");
+            return veiculo == null ? null : new VeiculoResumo(veiculo.Id, veiculo.Placa ?? "SEM-PLACA", veiculo.Modelo ?? "Modelo Indefinido", veiculo.Ano > 0 ? veiculo.Ano : 2022);
         }
 
         public async Task<IReadOnlyCollection<ItemServico>> ObterServicos(IReadOnlyCollection<Guid> idsServicos)
@@ -122,8 +128,8 @@ namespace OrdemServico.Lambda.Infrastructure.Http
             }
         }
 
-        private sealed record ClienteDto(Guid Id, string Nome, string Email);
-        private sealed record VeiculoDto(Guid Id);
+        private sealed record ClienteDto(Guid Id, string Nome, string Email, string? Telefone = null);
+        private sealed record VeiculoDto(Guid Id, string? Placa = null, string? Modelo = null, int Ano = 0);
         private sealed record ServicoDto(Guid Id, string Nome, decimal ValorUnitario, int TempoEstimadoMinutos);
         private sealed record PecaInsumoDto(Guid Id, string Descricao, decimal ValorUnitario);
         private sealed record ErroDto(int StatusCode, string Message);

@@ -17,7 +17,8 @@ namespace OrdemServico.Lambda.Application.Ports
         Task<IReadOnlyCollection<Domain.Entities.OrdemServico>> ObterAtivas();
     }
 
-    public sealed record ClienteResumo(Guid Id, string Nome, string Email);
+    public sealed record ClienteResumo(Guid Id, string Nome, string Email, string? Telefone = null);
+    public sealed record VeiculoResumo(Guid Id, string Placa, string Modelo, int Ano);
 
     /// <summary>
     /// Leitura dos dados de outros domínios (cliente, veículo, serviço e peça) que hoje
@@ -27,6 +28,7 @@ namespace OrdemServico.Lambda.Application.Ports
     {
         Task<ClienteResumo?> ObterCliente(Guid idCliente);
         Task<bool> VeiculoExiste(Guid idVeiculo);
+        Task<VeiculoResumo?> ObterVeiculo(Guid idVeiculo);
         Task<IReadOnlyCollection<ItemServico>> ObterServicos(IReadOnlyCollection<Guid> idsServicos);
         Task<IReadOnlyCollection<ItemPecaInsumo>> ObterPecasInsumo(IReadOnlyCollection<Guid> idsPecasInsumo);
     }
