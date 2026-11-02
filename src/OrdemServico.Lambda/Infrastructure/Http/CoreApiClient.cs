@@ -20,7 +20,7 @@ namespace OrdemServico.Lambda.Infrastructure.Http
         public async Task<ClienteResumo?> ObterCliente(Guid idCliente)
         {
             ClienteDto? cliente = await Obter<ClienteDto>($"api/v1/clientes/{idCliente}");
-            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Telefone);
+            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Telefone ?? cliente.Celular);
         }
 
         public async Task<bool> VeiculoExiste(Guid idVeiculo)
@@ -128,7 +128,7 @@ namespace OrdemServico.Lambda.Infrastructure.Http
             }
         }
 
-        private sealed record ClienteDto(Guid Id, string Nome, string Email, string? Telefone = null);
+        private sealed record ClienteDto(Guid Id, string Nome, string Email, string? Telefone = null, string? Celular = null);
         private sealed record VeiculoDto(Guid Id, string? Placa = null, string? Modelo = null, int Ano = 0);
         private sealed record ServicoDto(Guid Id, string Nome, decimal ValorUnitario, int TempoEstimadoMinutos);
         private sealed record PecaInsumoDto(Guid Id, string Descricao, decimal ValorUnitario);
