@@ -28,11 +28,49 @@ namespace OrdemServico.Lambda.Configuration
             LambdaSettings settings = LambdaSettings.FromConfiguration(configuration);
             services.AddSingleton(settings);
 
-            services.AddDefaultAWSOptions(configuration.GetAWSOptions());
-            services.AddAWSService<IAmazonDynamoDB>();
-            services.AddAWSService<IAmazonSQS>();
-            services.AddAWSService<IAmazonSimpleNotificationService>();
-            services.AddAWSService<IAmazonSimpleSystemsManagement>();
+            var regionName = configuration["AWS_REGION"]
+                ?? configuration["AWS_DEFAULT_REGION"]
+                ?? configuration["AWS:Region"]
+                ?? "sa-east-1";
+
+            var serviceUrl = configuration["AWS_SERVICE_URL"]
+                ?? configuration["AWS_ENDPOINT_URL"]
+                ?? configuration["AWS:ServiceURL"];
+
+            if (!string.IsNullOrWhiteSpace(serviceUrl))
+            {
+                var credentials = new Amazon.Runtime.BasicAWSCredentials("test", "test");
+                services.AddSingleton<IAmazonDynamoDB>(_ => new AmazonDynamoDBClient(credentials, new AmazonDynamoDBConfig
+                {
+                    ServiceURL = serviceUrl,
+                    AuthenticationRegion = regionName
+                }));
+                services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient(credentials, new AmazonSQSConfig
+                {
+                    ServiceURL = serviceUrl,
+                    AuthenticationRegion = regionName
+                }));
+                services.AddSingleton<IAmazonSimpleNotificationService>(_ => new AmazonSimpleNotificationServiceClient(credentials, new AmazonSimpleNotificationServiceConfig
+                {
+                    ServiceURL = serviceUrl,
+                    AuthenticationRegion = regionName
+                }));
+                services.AddSingleton<IAmazonSimpleSystemsManagement>(_ => new AmazonSimpleSystemsManagementClient(credentials, new AmazonSimpleSystemsManagementConfig
+                {
+                    ServiceURL = serviceUrl,
+                    AuthenticationRegion = regionName
+                }));
+            }
+            else
+            {
+                var awsOptions = configuration.GetAWSOptions();
+                awsOptions.Region = Amazon.RegionEndpoint.GetBySystemName(regionName);
+                services.AddDefaultAWSOptions(awsOptions);
+                services.AddAWSService<IAmazonDynamoDB>();
+                services.AddAWSService<IAmazonSQS>();
+                services.AddAWSService<IAmazonSimpleNotificationService>();
+                services.AddAWSService<IAmazonSimpleSystemsManagement>();
+            }
 
             // Segredos resolvidos sob demanda: a OutboxPublisherFunction não precisa deles.
             services.AddSingleton(sp => JwtSettings.Resolve(configuration, sp.GetRequiredService<IAmazonSimpleSystemsManagement>()));
