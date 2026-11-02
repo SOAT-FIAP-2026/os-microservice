@@ -1,0 +1,7 @@
+{
+  "Message": "{\"idOrdemServico\":\"11111111-1111-1111-1111-111111111111\",\"idPecaInsumo\":\"22222222-2222-2222-2222-222222222222\",\"motivo\":\"Estoque insuficiente.\"}",
+  "MessageAttributes": {
+    "tipoEvento": { "DataType": "String", "StringValue": "ReservaEstoqueFalhou" },
+    "origem": { "DataType": "String", "StringValue": "techchallenge.estoque" }
+  }
+}

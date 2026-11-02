@@ -1,0 +1,747 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Tech Challenge - Microsservico de Ordem de Servico em AWS Lambda (.NET 8).
+  API Gateway (HTTP API) + DynamoDB (single-table, transactional outbox via Streams) +
+  SNS + SQS, com saga de compensacao disparada por fila (SQS) e por evento (SNS).
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedPattern: "[a-z0-9-]+"
+    Description: Nome do ambiente (sufixo dos recursos).
+
+  CodeS3Bucket:
+    Type: String
+    Description: Bucket S3 onde o pacote da Lambda foi enviado (scripts/deploy.sh cuida disso).
+
+  CodeS3Key:
+    Type: String
+    Description: Chave S3 do zip publicado (dotnet publish) da Lambda.
+
+  CoreApiBaseUrl:
+    Type: String
+    Description: URL base da API core (monolito no EKS), ex. http://fiap-soat-terraform-alb-xxxx.sa-east-1.elb.amazonaws.com
+
+  JwtSecretSsmParameterName:
+    Type: String
+    Default: /techchallenge/prod/jwt_secret
+    Description: Parametro SSM (SecureString) com a chave HMAC do JWT, o mesmo usado pela API core.
+
+  JwtIssuer:
+    Type: String
+    Default: TechChallenge
+
+  JwtAudience:
+    Type: String
+    Default: techchallenge.com.br
+
+  ResendApiKeySsmParameterName:
+    Type: String
+    Default: ""
+    Description: (Opcional) Parametro SSM (SecureString) com a API key do Resend. Vazio desativa o envio de e-mail.
+
+  EmailDestinoOverride:
+    Type: String
+    Default: ""
+    Description: (Opcional) Envia todos os e-mails para este endereco (limitacao do plano gratuito do Resend).
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+Conditions:
+  HasResendApiKey: !Not [!Equals [!Ref ResendApiKeySsmParameterName, ""]]
+
+Mappings:
+  Defaults:
+    Lambda:
+      Runtime: dotnet8
+      Architecture: arm64
+    Events:
+      Source: techchallenge.ordem-servico
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # DynamoDB - tabela unica
+  #   OS#{id}           | METADATA      -> agregado Ordem de Servico (GSI1 = OS ativas)
+  #   OS#{id}           | SAGA#{idSaga} -> log da saga de reserva de estoque
+  #   OUTBOX#{idEvento} | OUTBOX        -> eventos pendentes (Streams -> SNS)
+  #   COMPENSACAO#{id}  | COMPENSACAO   -> idempotencia das compensacoes
+  # ---------------------------------------------------------------------------
+  OrdemServicoTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub techchallenge-ordem-servico-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      TimeToLiveSpecification:
+        AttributeName: expiraEm
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: Project, Value: techchallenge }
+        - { Key: Domain, Value: ordem-servico }
+
+  # ---------------------------------------------------------------------------
+  # SNS - topico de eventos de dominio (filtrados pelo atributo tipoEvento)
+  # ---------------------------------------------------------------------------
+  EventosTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub techchallenge-eventos-${Stage}
+
+  # ---------------------------------------------------------------------------
+  # SQS - fila de compensacao da saga e DLQs
+  # ---------------------------------------------------------------------------
+  CompensacaoDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub techchallenge-ordem-servico-compensacao-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CompensacaoQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub techchallenge-ordem-servico-compensacao-${Stage}
+      VisibilityTimeout: 360 # 6x o timeout da CompensacaoFilaFunction
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CompensacaoDLQ.Arn
+        maxReceiveCount: 5
+
+  CompensacaoEventoDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub techchallenge-ordem-servico-compensacao-evento-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CompensacaoEventoDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref CompensacaoEventoDLQ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSnsSubscription
+            Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt CompensacaoEventoDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref EventosTopic
+
+  OutboxDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub techchallenge-ordem-servico-outbox-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # Log groups
+  # ---------------------------------------------------------------------------
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/techchallenge-os-api-${Stage}
+      RetentionInDays: !Ref LogRetentionInDays
+
+  CompensacaoFilaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/techchallenge-os-compensacao-fila-${Stage}
+      RetentionInDays: !Ref LogRetentionInDays
+
+  CompensacaoEventoLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/techchallenge-os-compensacao-evento-${Stage}
+      RetentionInDays: !Ref LogRetentionInDays
+
+  OutboxPublisherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/techchallenge-os-outbox-${Stage}
+      RetentionInDays: !Ref LogRetentionInDays
+
+  HttpApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/techchallenge-ordem-servico-${Stage}
+      RetentionInDays: !Ref LogRetentionInDays
+
+  # ---------------------------------------------------------------------------
+  # IAM - uma role por funcao (menor privilegio)
+  # ---------------------------------------------------------------------------
+  ApiFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ordem-servico-api
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !GetAtt OrdemServicoTable.Arn
+                  - !Sub ${OrdemServicoTable.Arn}/index/*
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CompensacaoQueue.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JwtSecretSsmParameterName}
+                  - !If
+                    - HasResendApiKey
+                    - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ResendApiKeySsmParameterName}
+                    - !Ref AWS::NoValue
+
+  CompensacaoFilaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ordem-servico-compensacao-fila
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:ConditionCheckItem
+                Resource: !GetAtt OrdemServicoTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt CompensacaoQueue.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JwtSecretSsmParameterName}
+
+  CompensacaoEventoFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ordem-servico-compensacao-evento
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:ConditionCheckItem
+                Resource: !GetAtt OrdemServicoTable.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage # destino OnFailure da invocacao assincrona
+                Resource: !GetAtt CompensacaoEventoDLQ.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JwtSecretSsmParameterName}
+
+  OutboxPublisherFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ordem-servico-outbox
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                Resource: !GetAtt OrdemServicoTable.StreamArn
+              - Effect: Allow
+                Action: dynamodb:ListStreams
+                Resource: !Sub ${OrdemServicoTable.Arn}/stream/*
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref EventosTopic
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt OutboxDLQ.Arn
+
+  # ---------------------------------------------------------------------------
+  # Lambda - um unico pacote, quatro handlers
+  # ---------------------------------------------------------------------------
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub techchallenge-os-api-${Stage}
+      Description: API HTTP da Ordem de Servico (ASP.NET Core minimal API via API Gateway HTTP API).
+      Runtime: !FindInMap [Defaults, Lambda, Runtime]
+      Architectures: [!FindInMap [Defaults, Lambda, Architecture]]
+      Handler: OrdemServico.Lambda
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      MemorySize: 1024
+      Timeout: 29
+      Role: !GetAtt ApiFunctionRole.Arn
+      TracingConfig: { Mode: Active }
+      LoggingConfig:
+        LogGroup: !Ref ApiLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdemServicoTable
+          COMPENSACAO_QUEUE_URL: !Ref CompensacaoQueue
+          CORE_API_BASE_URL: !Ref CoreApiBaseUrl
+          JWT_SECRET_SSM_PARAMETER: !Ref JwtSecretSsmParameterName
+          JWT_ISSUER: !Ref JwtIssuer
+          JWT_AUDIENCE: !Ref JwtAudience
+          RESEND_API_KEY_SSM_PARAMETER: !Ref ResendApiKeySsmParameterName
+          EMAIL_DESTINO_OVERRIDE: !Ref EmailDestinoOverride
+          ASPNETCORE_ENVIRONMENT: Production
+
+  CompensacaoFilaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub techchallenge-os-compensacao-fila-${Stage}
+      Description: Saga - compensacoes recebidas pela fila SQS (estorno de estoque, etc.).
+      Runtime: !FindInMap [Defaults, Lambda, Runtime]
+      Architectures: [!FindInMap [Defaults, Lambda, Architecture]]
+      Handler: OrdemServico.Lambda::OrdemServico.Lambda.Functions.CompensacaoFilaFunction::Handle
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      MemorySize: 512
+      Timeout: 60
+      Role: !GetAtt CompensacaoFilaFunctionRole.Arn
+      TracingConfig: { Mode: Active }
+      LoggingConfig:
+        LogGroup: !Ref CompensacaoFilaLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdemServicoTable
+          CORE_API_BASE_URL: !Ref CoreApiBaseUrl
+          JWT_SECRET_SSM_PARAMETER: !Ref JwtSecretSsmParameterName
+          JWT_ISSUER: !Ref JwtIssuer
+          JWT_AUDIENCE: !Ref JwtAudience
+
+  CompensacaoEventoFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub techchallenge-os-compensacao-evento-${Stage}
+      Description: Saga - compensacoes disparadas por eventos do SNS.
+      Runtime: !FindInMap [Defaults, Lambda, Runtime]
+      Architectures: [!FindInMap [Defaults, Lambda, Architecture]]
+      Handler: OrdemServico.Lambda::OrdemServico.Lambda.Functions.CompensacaoEventoFunction::Handle
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      MemorySize: 512
+      Timeout: 60
+      Role: !GetAtt CompensacaoEventoFunctionRole.Arn
+      TracingConfig: { Mode: Active }
+      LoggingConfig:
+        LogGroup: !Ref CompensacaoEventoLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdemServicoTable
+          CORE_API_BASE_URL: !Ref CoreApiBaseUrl
+          JWT_SECRET_SSM_PARAMETER: !Ref JwtSecretSsmParameterName
+          JWT_ISSUER: !Ref JwtIssuer
+          JWT_AUDIENCE: !Ref JwtAudience
+
+  CompensacaoEventoInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref CompensacaoEventoFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      MaximumEventAgeInSeconds: 3600
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt CompensacaoEventoDLQ.Arn
+
+  OutboxPublisherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub techchallenge-os-outbox-${Stage}
+      Description: Transactional outbox - DynamoDB Streams para SNS.
+      Runtime: !FindInMap [Defaults, Lambda, Runtime]
+      Architectures: [!FindInMap [Defaults, Lambda, Architecture]]
+      Handler: OrdemServico.Lambda::OrdemServico.Lambda.Functions.OutboxPublisherFunction::Handle
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt OutboxPublisherFunctionRole.Arn
+      TracingConfig: { Mode: Active }
+      LoggingConfig:
+        LogGroup: !Ref OutboxPublisherLogGroup
+      Environment:
+        Variables:
+          EVENTOS_TOPIC_ARN: !Ref EventosTopic
+          EVENTO_ORIGEM: !FindInMap [Defaults, Events, Source]
+
+  # ---------------------------------------------------------------------------
+  # Gatilhos
+  # ---------------------------------------------------------------------------
+  CompensacaoFilaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref CompensacaoFilaFunction
+      EventSourceArn: !GetAtt CompensacaoQueue.Arn
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      ScalingConfig:
+        MaximumConcurrency: 5 # protege a API core durante rajadas de compensacao
+
+  OutboxEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref OutboxPublisherFunction
+      EventSourceArn: !GetAtt OrdemServicoTable.StreamArn
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 25
+      MaximumBatchingWindowInSeconds: 1
+      MaximumRetryAttempts: 10
+      MaximumRecordAgeInSeconds: 86400
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt OutboxDLQ.Arn
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT"],"dynamodb":{"NewImage":{"tipoEntidade":{"S":["OUTBOX"]}}}}'
+
+  # Eventos proprios (estorno de estoque) e falhas de outros participantes da saga.
+  CompensacaoEventoSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref EventosTopic
+      Protocol: lambda
+      Endpoint: !GetAtt CompensacaoEventoFunction.Arn
+      FilterPolicy:
+        tipoEvento: [OrcamentoReprovado, OrdemServicoCancelada, ReservaEstoqueFalhou, PagamentoRecusado]
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CompensacaoEventoDLQ.Arn
+
+  CompensacaoEventoSnsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CompensacaoEventoFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref EventosTopic
+
+  # ---------------------------------------------------------------------------
+  # API Gateway (HTTP API) - uma rota por endpoint do OrdemServicoController
+  # A validacao do JWT (HMAC-SHA256) acontece na Lambda, como na API core: o
+  # JWT authorizer nativo do HTTP API so aceita chaves assimetricas via JWKS.
+  # ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub techchallenge-ordem-servico-${Stage}
+      Description: API da Ordem de Servico (Lambda).
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, PATCH, DELETE, OPTIONS]
+        AllowHeaders: [Authorization, Content-Type, X-Correlation-ID]
+        ExposeHeaders: [X-Correlation-ID]
+        MaxAge: 600
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 29000
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+        DetailedMetricsEnabled: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","method":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","latency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}'
+
+  HttpApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
+
+  RouteCriar:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/ordens-servico
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteObterTodos:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/ordens-servico
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/ordens-servico/health
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteObterPorId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/ordens-servico/{id}
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteObterProgresso:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/ordens-servico/{id}/progresso
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteIncluirPecaInsumo:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/ordens-servico/{id}/pecas-insumos
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteIncluirServico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/ordens-servico/{id}/servicos
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteIniciarDiagnostico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/iniciar-diagnostico
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteFinalizarDiagnostico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/finalizar-diagnostico
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteAprovarOrcamento:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/aprovar-orcamento
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteConfirmarEntrega:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/confirmar-entrega
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteRemoverItemServico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/ordens-servico/{id}/servicos/{idServico}
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteRemoverItemPecaInsumo:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/ordens-servico/{id}/pecas-insumos/{idPecaInsumo}
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteIniciarServico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/servicos/{idServico}/iniciar
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  RouteFinalizarServico:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/ordens-servico/{id}/servicos/{idServico}/finalizar
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Alarmes
+  # ---------------------------------------------------------------------------
+  CompensacaoDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub techchallenge-os-compensacao-dlq-${Stage}
+      AlarmDescription: Compensacoes da fila esgotaram as retentativas (estoque pode estar inconsistente).
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt CompensacaoDLQ.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CompensacaoEventoDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub techchallenge-os-compensacao-evento-dlq-${Stage}
+      AlarmDescription: Eventos de compensacao nao processados.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt CompensacaoEventoDLQ.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  OutboxDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub techchallenge-os-outbox-dlq-${Stage}
+      AlarmDescription: Eventos do outbox que nao chegaram ao SNS.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt OutboxDLQ.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ApiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub techchallenge-os-api-5xx-${Stage}
+      AlarmDescription: Respostas 5xx na API da Ordem de Servico.
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - { Name: ApiId, Value: !Ref HttpApi }
+        - { Name: Stage, Value: $default }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiUrl:
+    Description: URL base da API (rotas em /api/v1/ordens-servico).
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  TableName:
+    Value: !Ref OrdemServicoTable
+  EventosTopicArn:
+    Description: Topico onde outros servicos publicam e assinam eventos (filtro pelo atributo tipoEvento).
+    Value: !Ref EventosTopic
+    Export:
+      Name: !Sub techchallenge-${Stage}-eventos-topic-arn
+  CompensacaoQueueUrl:
+    Description: Fila onde outros servicos podem enviar ComandoCompensacao.
+    Value: !Ref CompensacaoQueue
+  CompensacaoQueueArn:
+    Value: !GetAtt CompensacaoQueue.Arn
+    Export:
+      Name: !Sub techchallenge-${Stage}-ordem-servico-compensacao-queue-arn
+  CompensacaoDLQUrl:
+    Value: !Ref CompensacaoDLQ
+  CompensacaoEventoDLQUrl:
+    Value: !Ref CompensacaoEventoDLQ
+  OutboxDLQUrl:
+    Value: !Ref OutboxDLQ

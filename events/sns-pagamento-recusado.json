@@ -1,0 +1,7 @@
+{
+  "Message": "{\"idOrdemServico\":\"11111111-1111-1111-1111-111111111111\",\"motivo\":\"Cartão recusado\"}",
+  "MessageAttributes": {
+    "tipoEvento": { "DataType": "String", "StringValue": "PagamentoRecusado" },
+    "origem": { "DataType": "String", "StringValue": "techchallenge.pagamento" }
+  }
+}

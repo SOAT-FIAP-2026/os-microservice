@@ -1,0 +1,7 @@
+artifacts/
+infra/packaged.yaml
+bin/
+obj/
+.vs/
+*.user
+.DS_Store
