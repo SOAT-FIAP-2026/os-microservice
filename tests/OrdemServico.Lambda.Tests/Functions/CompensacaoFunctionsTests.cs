@@ -54,6 +54,29 @@ namespace OrdemServico.Lambda.Tests.Functions
         }
 
         [Fact]
+        public void Traduzir_EventoComEventId_DeveUsarEventIdParaIdempotencia()
+        {
+            Guid eventId = Guid.NewGuid();
+
+            ComandoCompensacao? comando = CompensacaoEventoFunction.Traduzir(
+                Evento("OrcamentoReprovado", "techchallenge.ordem-servico", new { eventId, osId = Guid.NewGuid() }));
+
+            comando!.IdCompensacao.Should().Be($"evt-{eventId}");
+        }
+
+        [Fact]
+        public void Traduzir_EventoComOsId_DeveLerIdentificadorCorretamente()
+        {
+            Guid osId = Guid.NewGuid();
+            Guid peca = Guid.NewGuid();
+
+            ComandoCompensacao? comando = CompensacaoEventoFunction.Traduzir(
+                Evento("OrcamentoReprovado", "techchallenge.ordem-servico", new { osId, pecasInsumosIds = new[] { peca } }));
+
+            comando!.IdOrdemServico.Should().Be(osId);
+        }
+
+        [Fact]
         public void Traduzir_ReservaEstoqueFalhou_DeveRemoverPecaDaOrdem()
         {
             Guid idOs = Guid.NewGuid(), peca = Guid.NewGuid();

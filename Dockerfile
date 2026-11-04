@@ -4,9 +4,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
+COPY --from=shared src/Fiap.TechChallenge.Contracts/Fiap.TechChallenge.Contracts.csproj /shared/src/Fiap.TechChallenge.Contracts/
 COPY src/OrdemServico.Lambda/OrdemServico.Lambda.csproj src/OrdemServico.Lambda/
 RUN dotnet restore src/OrdemServico.Lambda/OrdemServico.Lambda.csproj
 
+COPY --from=shared src/Fiap.TechChallenge.Contracts/ /shared/src/Fiap.TechChallenge.Contracts/
 COPY src/ src/
 RUN dotnet publish src/OrdemServico.Lambda/OrdemServico.Lambda.csproj \
     -c Release \

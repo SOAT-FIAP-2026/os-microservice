@@ -32,4 +32,8 @@
     <InternalsVisibleTo Include="OrdemServico.Lambda.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\shared\src\Fiap.TechChallenge.Contracts\Fiap.TechChallenge.Contracts.csproj" />
+  </ItemGroup>
+
 </Project>

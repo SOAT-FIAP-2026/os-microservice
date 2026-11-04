@@ -1,5 +1,4 @@
-using OrdemServico.Lambda.Application.DTOs.Requests;
-using OrdemServico.Lambda.Application.DTOs.Responses;
+using Fiap.TechChallenge.Contracts.OsService;
 using OrdemServico.Lambda.Application.Services;
 
 namespace OrdemServico.Lambda.Api
@@ -16,7 +15,7 @@ namespace OrdemServico.Lambda.Api
 
         public static IEndpointRouteBuilder MapOrdemServicoEndpoints(this IEndpointRouteBuilder app)
         {
-            RouteGroupBuilder group = app.MapGroup("/api/v1/ordens-servico")
+            RouteGroupBuilder group = app.MapGroup($"/{OrdemServicoApiRoutes.Base}")
                 .WithTags("Ordens de Serviço");
 
             group.MapPost("", async (OrdemServicoRequest request, IOrdemServicoService service) =>

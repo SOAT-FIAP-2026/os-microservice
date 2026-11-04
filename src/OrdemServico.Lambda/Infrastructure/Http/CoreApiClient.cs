@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using Fiap.TechChallenge.Contracts.CoreService;
 using OrdemServico.Lambda.Application.Ports;
 using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Domain.Entities;
@@ -19,24 +20,24 @@ namespace OrdemServico.Lambda.Infrastructure.Http
 
         public async Task<ClienteResumo?> ObterCliente(Guid idCliente)
         {
-            ClienteDto? cliente = await Obter<ClienteDto>($"api/v1/clientes/{idCliente}");
+            ClienteCatalogoDto? cliente = await Obter<ClienteCatalogoDto>(string.Format(CoreApiRoutes.ObterClientePorId, idCliente));
             return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Telefone ?? cliente.Celular);
         }
 
         public async Task<bool> VeiculoExiste(Guid idVeiculo)
         {
-            return await Obter<VeiculoDto>($"api/v1/veiculos/{idVeiculo}") != null;
+            return await Obter<VeiculoCatalogoDto>(string.Format(CoreApiRoutes.ObterVeiculoPorId, idVeiculo)) != null;
         }
 
         public async Task<VeiculoResumo?> ObterVeiculo(Guid idVeiculo)
         {
-            VeiculoDto? veiculo = await Obter<VeiculoDto>($"api/v1/veiculos/{idVeiculo}");
+            VeiculoCatalogoDto? veiculo = await Obter<VeiculoCatalogoDto>(string.Format(CoreApiRoutes.ObterVeiculoPorId, idVeiculo));
             return veiculo == null ? null : new VeiculoResumo(veiculo.Id, veiculo.Placa ?? "SEM-PLACA", veiculo.Modelo ?? "Modelo Indefinido", veiculo.Ano > 0 ? veiculo.Ano : 2022);
         }
 
         public async Task<IReadOnlyCollection<ItemServico>> ObterServicos(IReadOnlyCollection<Guid> idsServicos)
         {
-            ServicoDto?[] servicos = await Task.WhenAll(idsServicos.Distinct().Select(id => Obter<ServicoDto>($"api/v1/servicos/{id}")));
+            ServicoCatalogoDto?[] servicos = await Task.WhenAll(idsServicos.Distinct().Select(id => Obter<ServicoCatalogoDto>(string.Format(CoreApiRoutes.ObterServicoPorId, id))));
 
             return [.. servicos
                 .Where(servico => servico != null)
@@ -45,7 +46,7 @@ namespace OrdemServico.Lambda.Infrastructure.Http
 
         public async Task<IReadOnlyCollection<ItemPecaInsumo>> ObterPecasInsumo(IReadOnlyCollection<Guid> idsPecasInsumo)
         {
-            PecaInsumoDto?[] pecas = await Task.WhenAll(idsPecasInsumo.Distinct().Select(id => Obter<PecaInsumoDto>($"api/v1/pecas-insumos/{id}")));
+            PecaInsumoCatalogoDto?[] pecas = await Task.WhenAll(idsPecasInsumo.Distinct().Select(id => Obter<PecaInsumoCatalogoDto>(string.Format(CoreApiRoutes.ObterPecaInsumoPorId, id))));
 
             return [.. pecas
                 .Where(peca => peca != null)
@@ -54,12 +55,12 @@ namespace OrdemServico.Lambda.Infrastructure.Http
 
         public Task BaixarEstoque(Guid idPecaInsumo, int quantidade)
         {
-            return AlterarQuantidade($"api/v1/estoques/{idPecaInsumo}/remover-quantidade", quantidade);
+            return AlterarQuantidade(string.Format(CoreApiRoutes.RemoverQuantidadeEstoque, idPecaInsumo), quantidade);
         }
 
         public Task EstornarEstoque(Guid idPecaInsumo, int quantidade)
         {
-            return AlterarQuantidade($"api/v1/estoques/{idPecaInsumo}/adicionar-quantidade", quantidade);
+            return AlterarQuantidade(string.Format(CoreApiRoutes.AdicionarQuantidadeEstoque, idPecaInsumo), quantidade);
         }
 
         /// <summary>
@@ -128,10 +129,6 @@ namespace OrdemServico.Lambda.Infrastructure.Http
             }
         }
 
-        private sealed record ClienteDto(Guid Id, string Nome, string Email, string? Telefone = null, string? Celular = null);
-        private sealed record VeiculoDto(Guid Id, string? Placa = null, string? Modelo = null, int Ano = 0);
-        private sealed record ServicoDto(Guid Id, string Nome, decimal ValorUnitario, int TempoEstimadoMinutos);
-        private sealed record PecaInsumoDto(Guid Id, string Descricao, decimal ValorUnitario);
         private sealed record ErroDto(int StatusCode, string Message);
     }
 }
