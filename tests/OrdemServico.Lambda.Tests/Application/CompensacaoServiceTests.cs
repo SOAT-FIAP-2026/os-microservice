@@ -3,8 +3,10 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using OrdemServico.Lambda.Application.Ports;
 using OrdemServico.Lambda.Application.Saga;
+using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Domain.Entities;
 using OrdemServico.Lambda.Domain.Events;
+using OrdemServico.Lambda.Infrastructure.Messaging;
 
 namespace OrdemServico.Lambda.Tests.Application
 {
@@ -100,6 +102,58 @@ namespace OrdemServico.Lambda.Tests.Application
 
             await acao.Should().ThrowAsync<HttpRequestException>();
             _registros.Verify(r => r.Salvar(It.Is<RegistroCompensacao>(reg => reg.Concluida)), Times.Never);
+        }
+
+        [Fact]
+        public async Task CancelarOrdemServico_ComPecasEPublisher_DeveEstornarEstoqueEPublicarSns()
+        {
+            var snsMock = new Mock<Amazon.SimpleNotificationService.IAmazonSimpleNotificationService>();
+            var settings = new LambdaSettings
+            {
+                EventosTopicArn = "arn:aws:sns:sa-east-1:000000000000:techchallenge-eventos-local",
+                EventoOrigem = "techchallenge.ordem-servico"
+            };
+            var publisher = new SnsPublisher(snsMock.Object, settings);
+            var serviceComPublisher = new CompensacaoService(
+                _repository.Object, _estoque.Object, _sagaRepository.Object, _registros.Object,
+                NullLogger<CompensacaoService>.Instance, publisher);
+
+            var ordem = new Lambda.Domain.Entities.OrdemServico(Guid.NewGuid(), Guid.NewGuid(), "Joao", null);
+            Guid peca1 = Guid.NewGuid(), peca2 = Guid.NewGuid();
+            ordem.SincronizarItens([], [new ItemPecaInsumo(peca1, "Peca 1", 50m), new ItemPecaInsumo(peca2, "Peca 2", 100m)]);
+            ordem.LimparEventos();
+            _repository.Setup(r => r.ObterPorId(ordem.Id)).ReturnsAsync(ordem);
+
+            await serviceComPublisher.Executar(new ComandoCompensacao("evt-cancelar", TipoCompensacao.CancelarOrdemServico, ordem.Id, [], "Cancelado"), "sns");
+
+            ordem.Status.Should().Be(StatusOS.Cancelada);
+            _estoque.Verify(e => e.EstornarEstoque(peca1, 1), Times.Once);
+            _estoque.Verify(e => e.EstornarEstoque(peca2, 1), Times.Once);
+            snsMock.Verify(s => s.PublishAsync(It.Is<Amazon.SimpleNotificationService.Model.PublishRequest>(req =>
+                req.MessageAttributes["tipoEvento"].StringValue == "OrdemServicoCanceladaEvent" &&
+                req.MessageAttributes["idOrdemServico"].StringValue == ordem.Id.ToString()), It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task CancelarOrdemServico_ComPecaJaEstornadaNoRegistro_NaoDeveEstornarNovamente()
+        {
+            var ordem = new Lambda.Domain.Entities.OrdemServico(Guid.NewGuid(), Guid.NewGuid(), "Joao", null);
+            Guid peca1 = Guid.NewGuid(), peca2 = Guid.NewGuid();
+            ordem.SincronizarItens([], [new ItemPecaInsumo(peca1, "Peca 1", 50m), new ItemPecaInsumo(peca2, "Peca 2", 100m)]);
+            ordem.LimparEventos();
+            _repository.Setup(r => r.ObterPorId(ordem.Id)).ReturnsAsync(ordem);
+
+            var registro = new RegistroCompensacao
+            {
+                IdCompensacao = "evt-parcial",
+                PecasEstornadas = [peca1]
+            };
+            _registros.Setup(r => r.Obter("evt-parcial")).ReturnsAsync(registro);
+
+            await _service.Executar(new ComandoCompensacao("evt-parcial", TipoCompensacao.CancelarOrdemServico, ordem.Id, [], "Cancelado"), "sns");
+
+            _estoque.Verify(e => e.EstornarEstoque(peca1, It.IsAny<int>()), Times.Never);
+            _estoque.Verify(e => e.EstornarEstoque(peca2, 1), Times.Once);
         }
     }
 }

@@ -188,6 +188,12 @@ namespace OrdemServico.Lambda.Domain.Entities
             AtualizarTimestamp();
         }
 
+        public void AtualizarValorOrcamento(decimal valor)
+        {
+            ValorOrcamento = Math.Round(valor, 2);
+            AtualizarTimestamp();
+        }
+
         public void RegistrarEvento(EventoDominio evento)
         {
             _eventos.Add(evento);

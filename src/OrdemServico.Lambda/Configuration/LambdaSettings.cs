@@ -16,6 +16,7 @@ namespace OrdemServico.Lambda.Configuration
         public string? JwtAudience { get; init; }
         public string EmailRemetente { get; init; } = "osstatusupdate@resend.dev";
         public string? EmailDestinoOverride { get; init; }
+        public string OsEventosQueueUrl { get; init; } = string.Empty;
 
         public static LambdaSettings FromConfiguration(IConfiguration configuration)
         {
@@ -29,7 +30,8 @@ namespace OrdemServico.Lambda.Configuration
                 JwtIssuer = configuration["JWT_ISSUER"],
                 JwtAudience = configuration["JWT_AUDIENCE"],
                 EmailRemetente = configuration["EMAIL_REMETENTE"] ?? "osstatusupdate@resend.dev",
-                EmailDestinoOverride = configuration["EMAIL_DESTINO_OVERRIDE"]
+                EmailDestinoOverride = configuration["EMAIL_DESTINO_OVERRIDE"],
+                OsEventosQueueUrl = configuration["OS_EVENTOS_QUEUE_URL"] ?? configuration["OS_QUEUE_URL"] ?? "http://floci:4566/000000000000/techchallenge-os-eventos-local"
             };
         }
     }

@@ -1,6 +1,10 @@
+using System.Text.Json;
+using Fiap.TechChallenge.Contracts.Events;
 using Microsoft.Extensions.Logging;
 using OrdemServico.Lambda.Application.Ports;
+using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Domain.Events;
+using OrdemServico.Lambda.Infrastructure.Messaging;
 
 namespace OrdemServico.Lambda.Application.Saga
 {
@@ -14,13 +18,15 @@ namespace OrdemServico.Lambda.Application.Saga
         IEstoqueGateway estoqueGateway,
         ISagaRepository sagaRepository,
         IRegistroCompensacaoRepository registroRepository,
-        ILogger<CompensacaoService> logger)
+        ILogger<CompensacaoService> logger,
+        SnsPublisher? snsPublisher = null)
     {
         private readonly IOrdemServicoRepository _ordemServicoRepository = ordemServicoRepository;
         private readonly IEstoqueGateway _estoqueGateway = estoqueGateway;
         private readonly ISagaRepository _sagaRepository = sagaRepository;
         private readonly IRegistroCompensacaoRepository _registroRepository = registroRepository;
         private readonly ILogger<CompensacaoService> _logger = logger;
+        private readonly SnsPublisher? _snsPublisher = snsPublisher;
 
         public async Task Executar(ComandoCompensacao comando, string origem)
         {
@@ -49,7 +55,7 @@ namespace OrdemServico.Lambda.Application.Saga
                     await RemoverPecasDaOrdem(comando, origem);
                     break;
                 case TipoCompensacao.CancelarOrdemServico:
-                    await CancelarOrdem(comando, origem);
+                    await CancelarOrdem(comando, registro, origem);
                     break;
                 default:
                     throw new InvalidOperationException($"Tipo de compensação não suportado: {comando.Tipo}.");
@@ -109,7 +115,9 @@ namespace OrdemServico.Lambda.Application.Saga
             await _ordemServicoRepository.Atualizar(ordemServico);
         }
 
-        private async Task CancelarOrdem(ComandoCompensacao comando, string origem)
+        private Task CancelarOrdem(ComandoCompensacao comando, string origem) => CancelarOrdem(comando, null, origem);
+
+        private async Task CancelarOrdem(ComandoCompensacao comando, RegistroCompensacao? registro, string origem)
         {
             Domain.Entities.OrdemServico? ordemServico = await _ordemServicoRepository.ObterPorId(comando.IdOrdemServico);
 
@@ -118,6 +126,8 @@ namespace OrdemServico.Lambda.Application.Saga
                 _logger.LogWarning("OS {IdOrdemServico} não encontrada para compensação {IdCompensacao}.", comando.IdOrdemServico, comando.IdCompensacao);
                 return;
             }
+
+            var pecas = ordemServico.ItensPecaInsumo.Select(p => p.IdPecaInsumo).Distinct().ToList();
 
             if (!ordemServico.Cancelar(comando.Motivo))
             {
@@ -128,6 +138,43 @@ namespace OrdemServico.Lambda.Application.Saga
 
             ordemServico.RegistrarEvento(new CompensacaoExecutada(ordemServico.Id, comando.IdCompensacao, comando.Tipo.ToString(), origem));
             await _ordemServicoRepository.Atualizar(ordemServico);
+
+            foreach (Guid idPeca in pecas)
+            {
+                if (registro != null && registro.PecasEstornadas.Contains(idPeca))
+                    continue;
+
+                await _estoqueGateway.EstornarEstoque(idPeca, 1);
+
+                if (registro != null)
+                {
+                    registro.MarcarPecaEstornada(idPeca);
+                    await _registroRepository.Salvar(registro);
+                }
+            }
+
+            if (_snsPublisher != null)
+            {
+                try
+                {
+                    var eventoCancelada = new OrdemServicoCanceladaEvent(
+                        ordemServico.Id,
+                        comando.Motivo,
+                        pecas);
+
+                    await _snsPublisher.Publicar(new EventoOutbox(
+                        Guid.NewGuid().ToString(),
+                        "OrdemServicoCanceladaEvent",
+                        ordemServico.Id.ToString(),
+                        JsonSerializer.Serialize(eventoCancelada, JsonDefaults.Options)));
+
+                    _logger.LogInformation("OrdemServicoCanceladaEvent publicado no SNS para OS {OsId}.", ordemServico.Id);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Falha ao publicar OrdemServicoCanceladaEvent no SNS para OS {OsId}", ordemServico.Id);
+                }
+            }
         }
     }
 }

@@ -106,6 +106,8 @@ namespace OrdemServico.Lambda.Configuration
             services.AddScoped<CompensacaoService>();
             services.AddScoped<IOrdemServicoService, OrdemServicoService>();
 
+            services.AddHostedService<OsSqsBackgroundWorker>();
+
             return services;
         }
 

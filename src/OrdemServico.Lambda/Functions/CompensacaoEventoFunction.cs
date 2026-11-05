@@ -59,7 +59,15 @@ namespace OrdemServico.Lambda.Functions
         {
             string? tipoEvento = LerAtributo(mensagem, "tipoEvento");
 
-            if (tipoEvento is not ("OrcamentoReprovado" or "OrdemServicoCancelada" or "ReservaEstoqueFalhou" or "PagamentoRecusado"))
+            if (tipoEvento is not (
+                "OrcamentoReprovado" or
+                "OrdemServicoCancelada" or
+                "OrdemServicoCanceladaEvent" or
+                "ReservaEstoqueFalhou" or
+                "PagamentoRecusado" or
+                "PagamentoRecusadoEvent" or
+                "PagamentoCanceladoCompensacaoEvent" or
+                "PagamentoCanceladoCompensacao"))
                 return null;
 
             using JsonDocument documento = JsonDocument.Parse(mensagem.Message);
@@ -75,7 +83,7 @@ namespace OrdemServico.Lambda.Functions
                     idCompensacao, TipoCompensacao.EstornarEstoque, LerGuid(detail, "idOrdemServico", "osId"),
                     LerGuids(detail, "pecasInsumosIds"), "Orçamento reprovado pelo cliente"),
 
-                "OrdemServicoCancelada" => new ComandoCompensacao(
+                "OrdemServicoCancelada" or "OrdemServicoCanceladaEvent" => new ComandoCompensacao(
                     idCompensacao, TipoCompensacao.EstornarEstoque, LerGuid(detail, "idOrdemServico", "osId"),
                     LerGuids(detail, "pecasInsumosIds"), LerTexto(detail, "motivo") ?? "Ordem de serviço cancelada"),
 
@@ -83,6 +91,10 @@ namespace OrdemServico.Lambda.Functions
                     idCompensacao, TipoCompensacao.RemoverPecaInsumo, LerGuid(detail, "idOrdemServico", "osId"),
                     detail.TryGetProperty("idPecaInsumo", out _) ? [LerGuid(detail, "idPecaInsumo")] : LerGuids(detail, "pecasInsumosIds"),
                     LerTexto(detail, "motivo") ?? "Reserva de estoque falhou"),
+
+                "PagamentoCanceladoCompensacaoEvent" or "PagamentoCanceladoCompensacao" => new ComandoCompensacao(
+                    idCompensacao, TipoCompensacao.CancelarOrdemServico, LerGuid(detail, "idOrdemServico", "osId"),
+                    [], LerTexto(detail, "motivo") ?? "Pagamento cancelado ou compensação solicitada"),
 
                 _ => new ComandoCompensacao(
                     idCompensacao, TipoCompensacao.CancelarOrdemServico, LerGuid(detail, "idOrdemServico", "osId"),

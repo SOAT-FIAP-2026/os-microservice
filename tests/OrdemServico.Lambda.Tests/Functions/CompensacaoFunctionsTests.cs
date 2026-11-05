@@ -99,6 +99,32 @@ namespace OrdemServico.Lambda.Tests.Functions
         }
 
         [Fact]
+        public void Traduzir_PagamentoCanceladoCompensacaoEvent_DeveCancelarOrdem()
+        {
+            Guid osId = Guid.NewGuid();
+            ComandoCompensacao? comando = CompensacaoEventoFunction.Traduzir(
+                Evento("PagamentoCanceladoCompensacaoEvent", "techchallenge.pagamento", new { osId, motivo = "expirado" }));
+
+            comando.Should().NotBeNull();
+            comando!.Tipo.Should().Be(TipoCompensacao.CancelarOrdemServico);
+            comando.IdOrdemServico.Should().Be(osId);
+            comando.Motivo.Should().Be("expirado");
+        }
+
+        [Fact]
+        public void Traduzir_PagamentoRecusadoEvent_DeveCancelarOrdem()
+        {
+            Guid osId = Guid.NewGuid();
+            ComandoCompensacao? comando = CompensacaoEventoFunction.Traduzir(
+                Evento("PagamentoRecusadoEvent", "techchallenge.pagamento", new { osId, motivo = "recusado pelo banco" }));
+
+            comando.Should().NotBeNull();
+            comando!.Tipo.Should().Be(TipoCompensacao.CancelarOrdemServico);
+            comando.IdOrdemServico.Should().Be(osId);
+            comando.Motivo.Should().Be("recusado pelo banco");
+        }
+
+        [Fact]
         public void Traduzir_EventoDesconhecido_DeveRetornarNull()
         {
             CompensacaoEventoFunction.Traduzir(Evento("Outro", "x", new { })).Should().BeNull();
