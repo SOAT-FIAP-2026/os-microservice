@@ -1,13 +1,17 @@
+using Amazon.SimpleNotificationService;
+using Amazon.SimpleNotificationService.Model;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
-using OrdemServico.Lambda.Application.DTOs.Requests;
+using Fiap.TechChallenge.Contracts.OsService;
 using OrdemServico.Lambda.Application.Ports;
 using OrdemServico.Lambda.Application.Saga;
 using OrdemServico.Lambda.Application.Services;
+using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Domain.Entities;
 using OrdemServico.Lambda.Domain.Events;
 using OrdemServico.Lambda.Domain.Exceptions;
+using OrdemServico.Lambda.Infrastructure.Messaging;
 
 namespace OrdemServico.Lambda.Tests.Application
 {
@@ -232,6 +236,60 @@ namespace OrdemServico.Lambda.Tests.Application
 
             progresso.PercentualConcluido.Should().Be(50);
             progresso.Servicos.Select(s => s.Status).Should().Equal("Finalizado", "Pendente");
+        }
+
+        [Fact]
+        public async Task Criar_ComSnsPublisher_DevePublicarOrdemServicoAbertaEventTipado()
+        {
+            var mockSns = new Mock<IAmazonSimpleNotificationService>();
+            mockSns.Setup(s => s.PublishAsync(It.IsAny<PublishRequest>(), default))
+                .ReturnsAsync(new PublishResponse());
+            var publisher = new SnsPublisher(mockSns.Object, new LambdaSettings { EventosTopicArn = "arn:aws:sns:test", EventoOrigem = "test" });
+
+            var saga = new ReservaEstoqueSaga(_estoque.Object, _sagaRepository.Object, _fila.Object, NullLogger<ReservaEstoqueSaga>.Instance);
+            var service = new OrdemServicoService(_repository.Object, _catalogo.Object, saga, _email.Object, publisher, NullLogger<OrdemServicoService>.Instance);
+
+            var clienteId = Guid.NewGuid();
+            var veiculoId = Guid.NewGuid();
+            var request = new OrdemServicoRequest(clienteId, veiculoId, "teste observacao");
+            _catalogo.Setup(c => c.ObterCliente(clienteId)).ReturnsAsync(new ClienteResumo(clienteId, "Joao", "joao@email.com", "11999998888"));
+            _catalogo.Setup(c => c.ObterVeiculo(veiculoId)).ReturnsAsync(new VeiculoResumo(veiculoId, "ABC1D23", "Gol", 2020));
+            _catalogo.Setup(c => c.VeiculoExiste(veiculoId)).ReturnsAsync(true);
+            _email.Setup(e => e.EnviarEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>())).ReturnsAsync(true);
+
+            var (id, notificado) = await service.Criar(request);
+
+            mockSns.Verify(s => s.PublishAsync(It.Is<PublishRequest>(req =>
+                req.MessageAttributes["tipoEvento"].StringValue == "OrdemServicoAbertaEvent" &&
+                req.Message.Contains("\"placa\":\"ABC1D23\"") &&
+                req.Message.Contains("\"nome\":\"Joao\"")
+            ), default), Times.Once);
+        }
+
+        [Fact]
+        public async Task AprovarOrcamento_ComSnsPublisher_DevePublicarOrdemServicoLiberadaParaExecucaoEventTipado()
+        {
+            var mockSns = new Mock<IAmazonSimpleNotificationService>();
+            mockSns.Setup(s => s.PublishAsync(It.IsAny<PublishRequest>(), default))
+                .ReturnsAsync(new PublishResponse());
+            var publisher = new SnsPublisher(mockSns.Object, new LambdaSettings { EventosTopicArn = "arn:aws:sns:test", EventoOrigem = "test" });
+
+            var saga = new ReservaEstoqueSaga(_estoque.Object, _sagaRepository.Object, _fila.Object, NullLogger<ReservaEstoqueSaga>.Instance);
+            var service = new OrdemServicoService(_repository.Object, _catalogo.Object, saga, _email.Object, publisher, NullLogger<OrdemServicoService>.Instance);
+
+            var ordem = OrdemExistente(StatusOS.AguardandoAprovacao);
+            var servico1 = new ItemServico(Guid.NewGuid(), "Troca de Oleo", 100m, 45);
+            ordem.SincronizarItens([servico1], []);
+            _email.Setup(e => e.EnviarEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>())).ReturnsAsync(true);
+
+            var response = await service.AprovarOrcamento(ordem.Id, true);
+
+            response.StatusDescricao.Should().Be("Orçamento Aprovado");
+            mockSns.Verify(s => s.PublishAsync(It.Is<PublishRequest>(req =>
+                req.MessageAttributes["tipoEvento"].StringValue == "OrdemServicoLiberadaParaExecucaoEvent" &&
+                req.Message.Contains("\"descricao\":\"Troca de Oleo\"") &&
+                req.Message.Contains("\"tempoEstimadoMinutos\":45")
+            ), default), Times.Once);
         }
     }
 }

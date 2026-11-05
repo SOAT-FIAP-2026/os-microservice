@@ -1,13 +1,14 @@
 using System.IO;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using OrdemServico.Lambda.Application.DTOs.Requests;
-using OrdemServico.Lambda.Application.DTOs.Responses;
+using Fiap.TechChallenge.Contracts.Events;
+using Fiap.TechChallenge.Contracts.OsService;
 using OrdemServico.Lambda.Application.Ports;
 using OrdemServico.Lambda.Application.Saga;
 using OrdemServico.Lambda.Domain.Entities;
 using OrdemServico.Lambda.Domain.Events;
 using OrdemServico.Lambda.Domain.Exceptions;
+using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Infrastructure.Messaging;
 
 namespace OrdemServico.Lambda.Application.Services
@@ -90,34 +91,18 @@ namespace OrdemServico.Lambda.Application.Services
             {
                 try
                 {
-                    var eventoAberta = new
-                    {
-                        osId = ordemServico.Id,
-                        cliente = new
-                        {
-                            idCliente = cliente.Id,
-                            nome = cliente.Nome,
-                            telefone = cliente.Telefone ?? "11987654321"
-                        },
-                        veiculo = new
-                        {
-                            placa = veiculo?.Placa ?? "SEM-PLACA",
-                            modelo = veiculo?.Modelo ?? "Veiculo",
-                            ano = veiculo?.Ano ?? 2022
-                        },
-                        filialId = "MATRIZ",
-                        observacao = request.Observacao,
-                        eventId = Guid.NewGuid(),
-                        correlationId = ordemServico.Id,
-                        occurredAt = DateTime.UtcNow,
-                        version = 1
-                    };
+                    var eventoAberta = new OrdemServicoAbertaEvent(
+                        ordemServico.Id,
+                        new ClienteInfo(cliente.Id, cliente.Nome, cliente.Telefone ?? "11987654321", cliente.Email),
+                        new VeiculoInfo(veiculo?.Placa ?? "SEM-PLACA", veiculo?.Modelo ?? "Veiculo", veiculo?.Ano ?? 2022),
+                        filialId: "MATRIZ",
+                        observacao: request.Observacao);
 
                     await _snsPublisher.Publicar(new EventoOutbox(
                         Guid.NewGuid().ToString(),
                         "OrdemServicoAbertaEvent",
                         ordemServico.Id.ToString(),
-                        JsonSerializer.Serialize(eventoAberta)));
+                        JsonSerializer.Serialize(eventoAberta, JsonDefaults.Options)));
                 }
                 catch (Exception ex)
                 {
@@ -144,8 +129,7 @@ namespace OrdemServico.Lambda.Application.Services
             bool notificado = await NotificarMudancaStatusAsync(ordemServico);
 
             var response = ToResponse(ordemServico);
-            response.ClienteNotificado = notificado;
-            return response;
+            return response with { ClienteNotificado = notificado };
         }
 
         public async Task<OrdemServicoResponse> FinalizarDiagnostico(Guid id)
@@ -167,8 +151,7 @@ namespace OrdemServico.Lambda.Application.Services
             bool notificado = await NotificarMudancaStatusAsync(ordemServico);
 
             var response = ToResponse(ordemServico);
-            response.ClienteNotificado = notificado;
-            return response;
+            return response with { ClienteNotificado = notificado };
         }
 
         public async Task<OrdemServicoResponse> IncluirServico(Guid id, OrdemServicoServicosRequest request)
@@ -303,28 +286,19 @@ namespace OrdemServico.Lambda.Application.Services
                 {
                     try
                     {
-                        var tarefas = ordemServico.ItensServico.Select(s => new
-                        {
-                            idServicoOrigem = s.IdServico,
-                            descricao = s.Nome,
-                            tempoEstimadoMinutos = s.TempoEstimadoMinutos > 0 ? s.TempoEstimadoMinutos : 60
-                        }).ToList();
+                        var tarefas = ordemServico.ItensServico.Select(s => new TarefaInfo(
+                            s.IdServico,
+                            s.Nome,
+                            s.TempoEstimadoMinutos > 0 ? s.TempoEstimadoMinutos : 60
+                        )).ToList();
 
-                        var eventoLiberada = new
-                        {
-                            osId = ordemServico.Id,
-                            tarefas = tarefas,
-                            eventId = Guid.NewGuid(),
-                            correlationId = ordemServico.Id,
-                            occurredAt = DateTime.UtcNow,
-                            version = 1
-                        };
+                        var eventoLiberada = new OrdemServicoLiberadaParaExecucaoEvent(ordemServico.Id, tarefas);
 
                         await _snsPublisher.Publicar(new EventoOutbox(
                             Guid.NewGuid().ToString(),
                             "OrdemServicoLiberadaParaExecucaoEvent",
                             ordemServico.Id.ToString(),
-                            JsonSerializer.Serialize(eventoLiberada)));
+                            JsonSerializer.Serialize(eventoLiberada, JsonDefaults.Options)));
                     }
                     catch (Exception ex)
                     {
@@ -341,8 +315,7 @@ namespace OrdemServico.Lambda.Application.Services
             bool notificado = await NotificarMudancaStatusAsync(ordemServico);
 
             var response = ToResponse(ordemServico);
-            response.ClienteNotificado = notificado;
-            return response;
+            return response with { ClienteNotificado = notificado };
         }
 
         public async Task<OrdemServicoResponse> ConfirmarEntrega(Guid id)

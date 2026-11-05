@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.SQSEvents;
+using Fiap.TechChallenge.Contracts.OsService;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using OrdemServico.Lambda.Application.Saga;
