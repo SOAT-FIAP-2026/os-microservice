@@ -1,3 +1,4 @@
+using Fiap.TechChallenge.Contracts.Common;
 using Microsoft.AspNetCore.Http;
 using OrdemServico.Lambda.Infrastructure.Security;
 
@@ -15,7 +16,7 @@ namespace OrdemServico.Lambda.Infrastructure.Http
     /// </summary>
     public class CoreApiAuthorization(IHttpContextAccessor httpContextAccessor, Lazy<ServiceTokenFactory> serviceTokenFactory) : ICoreApiAuthorization
     {
-        public const string CorrelationHeader = "X-Correlation-ID";
+        public const string CorrelationHeader = CorrelationContext.HeaderName;
 
         private readonly IHttpContextAccessor _httpContextAccessor = httpContextAccessor;
         private readonly Lazy<ServiceTokenFactory> _serviceTokenFactory = serviceTokenFactory;
@@ -31,7 +32,8 @@ namespace OrdemServico.Lambda.Infrastructure.Http
 
         public string? ObterCorrelationId()
         {
-            return _httpContextAccessor.HttpContext?.Request.Headers[CorrelationHeader].FirstOrDefault();
+            string? fromHttp = _httpContextAccessor.HttpContext?.Request.Headers[CorrelationHeader].FirstOrDefault();
+            return !string.IsNullOrWhiteSpace(fromHttp) ? fromHttp : CorrelationContext.Current;
         }
     }
 }

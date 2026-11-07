@@ -1,3 +1,5 @@
+using Fiap.TechChallenge.Contracts.Common;
+
 namespace OrdemServico.Lambda.Domain.Events
 {
     /// <summary>
@@ -9,6 +11,7 @@ namespace OrdemServico.Lambda.Domain.Events
         public Guid IdEvento { get; init; } = Guid.NewGuid();
         public DateTime OcorridoEm { get; init; } = DateTime.UtcNow;
         public string TipoEvento => GetType().Name;
+        public string? CorrelationId { get; init; } = CorrelationContext.Current;
     }
 
     public sealed record OrdemServicoCriada(Guid IdOrdemServico, Guid IdCliente, Guid IdVeiculo, string Status)

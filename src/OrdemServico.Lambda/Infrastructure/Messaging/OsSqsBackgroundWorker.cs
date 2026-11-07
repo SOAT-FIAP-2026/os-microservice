@@ -105,61 +105,84 @@ namespace OrdemServico.Lambda.Infrastructure.Messaging
         internal async Task ProcessarMensagemAsync(Message message, CancellationToken stoppingToken)
         {
             var (conteudoJson, tipoEvento) = ExtrairConteudoETipoEvento(message);
+            var sqsAttrs = message.MessageAttributes?.ToDictionary(
+                k => k.Key,
+                v => v.Value?.StringValue,
+                StringComparer.OrdinalIgnoreCase);
 
-            _logger.LogInformation("Mensagem SQS recebida no os-microservice. Tipo: {TipoEvento}", tipoEvento);
+            string correlationId = SnsCorrelationHelper.ExtractCorrelationId(
+                message.Body,
+                sqsAttrs,
+                fallbackId: message.MessageId);
+            string? osIdStr = SnsCorrelationHelper.ExtractOsId(message.Body, sqsAttrs);
 
-            using var scope = _scopeFactory.CreateScope();
-            var repo = scope.ServiceProvider.GetRequiredService<IOrdemServicoRepository>();
-            var publisher = scope.ServiceProvider.GetService<SnsPublisher>();
-            var compensacaoService = scope.ServiceProvider.GetRequiredService<CompensacaoService>();
-
-            switch (tipoEvento)
+            var logScope = new Dictionary<string, object>
             {
-                case nameof(DiagnosticoIniciadoEvent):
-                case "DiagnosticoIniciado":
-                    await ProcessarDiagnosticoIniciadoAsync(conteudoJson, repo, stoppingToken);
-                    break;
+                [CorrelationContext.LogScopeKey] = correlationId,
+                ["tipo_evento"] = tipoEvento
+            };
+            if (!string.IsNullOrWhiteSpace(osIdStr))
+                logScope[CorrelationContext.OsIdScopeKey] = osIdStr;
 
-                case nameof(DiagnosticoTecnicoConcluidoEvent):
-                case "DiagnosticoTecnicoConcluido":
-                    await ProcessarDiagnosticoTecnicoConcluidoAsync(conteudoJson, repo, stoppingToken);
-                    break;
+            using (CorrelationContext.Push(correlationId))
+            using (_logger.BeginScope(logScope))
+            {
+                _logger.LogInformation("Mensagem SQS recebida no os-microservice. Tipo: {TipoEvento} (CorrelationId: {CorrelationId})",
+                    tipoEvento, correlationId);
 
-                case nameof(OrcamentoGeradoEvent):
-                case "OrcamentoGerado":
-                    await ProcessarOrcamentoGeradoAsync(conteudoJson, repo, stoppingToken);
-                    break;
+                using var scope = _scopeFactory.CreateScope();
+                var repo = scope.ServiceProvider.GetRequiredService<IOrdemServicoRepository>();
+                var publisher = scope.ServiceProvider.GetService<SnsPublisher>();
+                var compensacaoService = scope.ServiceProvider.GetRequiredService<CompensacaoService>();
 
-                case nameof(PagamentoConfirmadoEvent):
-                case "PagamentoConfirmado":
-                    await ProcessarPagamentoConfirmadoAsync(conteudoJson, repo, publisher, stoppingToken);
-                    break;
+                switch (tipoEvento)
+                {
+                    case nameof(DiagnosticoIniciadoEvent):
+                    case "DiagnosticoIniciado":
+                        await ProcessarDiagnosticoIniciadoAsync(conteudoJson, repo, stoppingToken);
+                        break;
 
-                case nameof(ProducaoIniciadaEvent):
-                case "ProducaoIniciada":
-                    await ProcessarProducaoIniciadaAsync(conteudoJson, repo, stoppingToken);
-                    break;
+                    case nameof(DiagnosticoTecnicoConcluidoEvent):
+                    case "DiagnosticoTecnicoConcluido":
+                        await ProcessarDiagnosticoTecnicoConcluidoAsync(conteudoJson, repo, stoppingToken);
+                        break;
 
-                case nameof(ProducaoFinalizadaEvent):
-                case "ProducaoFinalizada":
-                    await ProcessarProducaoFinalizadaAsync(conteudoJson, repo, stoppingToken);
-                    break;
+                    case nameof(OrcamentoGeradoEvent):
+                    case "OrcamentoGerado":
+                        await ProcessarOrcamentoGeradoAsync(conteudoJson, repo, stoppingToken);
+                        break;
 
-                case nameof(PagamentoCanceladoCompensacaoEvent):
-                case "PagamentoCanceladoCompensacao":
-                case nameof(PagamentoRecusadoEvent):
-                case "PagamentoRecusado":
-                case nameof(ProducaoCanceladaEvent):
-                case "ProducaoCancelada":
-                case "OrcamentoReprovado":
-                case "OrdemServicoCancelada":
-                case nameof(OrdemServicoCanceladaEvent):
-                    await ProcessarCompensacaoAsync(tipoEvento, conteudoJson, compensacaoService, stoppingToken);
-                    break;
+                    case nameof(PagamentoConfirmadoEvent):
+                    case "PagamentoConfirmado":
+                        await ProcessarPagamentoConfirmadoAsync(conteudoJson, repo, publisher, stoppingToken);
+                        break;
 
-                default:
-                    _logger.LogDebug("Evento {TipoEvento} não requer ação do os-microservice.", tipoEvento);
-                    break;
+                    case nameof(ProducaoIniciadaEvent):
+                    case "ProducaoIniciada":
+                        await ProcessarProducaoIniciadaAsync(conteudoJson, repo, stoppingToken);
+                        break;
+
+                    case nameof(ProducaoFinalizadaEvent):
+                    case "ProducaoFinalizada":
+                        await ProcessarProducaoFinalizadaAsync(conteudoJson, repo, stoppingToken);
+                        break;
+
+                    case nameof(PagamentoCanceladoCompensacaoEvent):
+                    case "PagamentoCanceladoCompensacao":
+                    case nameof(PagamentoRecusadoEvent):
+                    case "PagamentoRecusado":
+                    case nameof(ProducaoCanceladaEvent):
+                    case "ProducaoCancelada":
+                    case "OrcamentoReprovado":
+                    case "OrdemServicoCancelada":
+                    case nameof(OrdemServicoCanceladaEvent):
+                        await ProcessarCompensacaoAsync(tipoEvento, conteudoJson, compensacaoService, stoppingToken);
+                        break;
+
+                    default:
+                        _logger.LogDebug("Evento {TipoEvento} não requer ação do os-microservice.", tipoEvento);
+                        break;
+                }
             }
         }
 

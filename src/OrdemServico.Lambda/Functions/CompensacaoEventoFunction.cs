@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.SNSEvents;
+using Fiap.TechChallenge.Contracts.Common;
 using Fiap.TechChallenge.Contracts.OsService;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -40,18 +41,41 @@ namespace OrdemServico.Lambda.Functions
             foreach (SNSEvent.SNSRecord registro in snsEvent.Records)
             {
                 SNSEvent.SNSMessage mensagem = registro.Sns;
-                ComandoCompensacao? comando = Traduzir(mensagem);
+                var snsAttrs = mensagem.MessageAttributes?.ToDictionary(
+                    k => k.Key,
+                    v => v.Value?.Value,
+                    StringComparer.OrdinalIgnoreCase);
 
-                if (comando == null)
+                string correlationId = SnsCorrelationHelper.ExtractCorrelationId(
+                    mensagem.Message,
+                    snsAttrs,
+                    fallbackId: mensagem.MessageId);
+
+                using (CorrelationContext.Push(correlationId))
+                using (logger.BeginScope(new Dictionary<string, object>
                 {
-                    logger.LogWarning("Mensagem {MessageId} de tipo {TipoEvento} não gera compensação. Ignorada.",
-                        mensagem.MessageId, LerAtributo(mensagem, "tipoEvento"));
-                    continue;
-                }
+                    [CorrelationContext.LogScopeKey] = correlationId
+                }))
+                {
+                    ComandoCompensacao? comando = Traduzir(mensagem);
 
-                using IServiceScope scope = _serviceProvider.CreateScope();
-                await scope.ServiceProvider.GetRequiredService<CompensacaoService>()
-                    .Executar(comando, $"sns:{LerAtributo(mensagem, "origem") ?? mensagem.TopicArn}");
+                    if (comando == null)
+                    {
+                        logger.LogWarning("Mensagem {MessageId} de tipo {TipoEvento} não gera compensação. Ignorada.",
+                            mensagem.MessageId, LerAtributo(mensagem, "tipoEvento"));
+                        continue;
+                    }
+
+                    using (logger.BeginScope(new Dictionary<string, object>
+                    {
+                        [CorrelationContext.OsIdScopeKey] = comando.IdOrdemServico
+                    }))
+                    {
+                        using IServiceScope scope = _serviceProvider.CreateScope();
+                        await scope.ServiceProvider.GetRequiredService<CompensacaoService>()
+                            .Executar(comando, $"sns:{LerAtributo(mensagem, "origem") ?? mensagem.TopicArn}");
+                    }
+                }
             }
         }
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Fiap.TechChallenge.Contracts.Common;
 using OrdemServico.Lambda.Domain.Exceptions;
 
 namespace OrdemServico.Lambda.Api
@@ -7,7 +8,7 @@ namespace OrdemServico.Lambda.Api
     /// <summary>Propaga/gera o X-Correlation-ID e abre um escopo de log com ele.</summary>
     public sealed class CorrelationIdMiddleware(RequestDelegate next, ILogger<CorrelationIdMiddleware> logger)
     {
-        public const string HeaderName = "X-Correlation-ID";
+        public const string HeaderName = CorrelationContext.HeaderName;
 
         public async Task InvokeAsync(HttpContext context)
         {
@@ -15,11 +16,19 @@ namespace OrdemServico.Lambda.Api
             string correlationId = !string.IsNullOrWhiteSpace(requestedId) && requestedId.Length <= 128
                 ? requestedId
                 : Guid.NewGuid().ToString();
+            string traceId = Activity.Current?.TraceId.ToHexString() ?? context.TraceIdentifier;
 
             context.Request.Headers[HeaderName] = correlationId;
             context.Response.Headers[HeaderName] = correlationId;
+            context.Items[HeaderName] = correlationId;
+            Activity.Current?.SetTag(CorrelationContext.LogScopeKey, correlationId);
 
-            using (logger.BeginScope(new Dictionary<string, object> { ["correlation_id"] = correlationId }))
+            using (CorrelationContext.Push(correlationId))
+            using (logger.BeginScope(new Dictionary<string, object>
+            {
+                [CorrelationContext.LogScopeKey] = correlationId,
+                ["trace_id"] = traceId
+            }))
             {
                 await next(context);
             }

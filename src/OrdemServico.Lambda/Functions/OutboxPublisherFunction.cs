@@ -1,5 +1,6 @@
 using Amazon.Lambda.Core;
 using Amazon.Lambda.DynamoDBEvents;
+using Fiap.TechChallenge.Contracts.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using OrdemServico.Lambda.Configuration;
@@ -41,15 +42,30 @@ namespace OrdemServico.Lambda.Functions
 
                 try
                 {
+                    string idOrdemServico = imagem["idOrdemServico"].S;
+                    string? correlationFromImage = imagem.TryGetValue("correlationId", out var corrAttr) ? corrAttr.S : null;
+                    string correlationId = CorrelationContext.Resolve(
+                        correlationFromImage,
+                        fallback: SnsCorrelationHelper.ExtractCorrelationId(payload.S, fallbackId: idOrdemServico));
+
                     var evento = new EventoOutbox(
                         IdEvento: imagem["PK"].S.Replace("OUTBOX#", string.Empty),
                         TipoEvento: imagem["tipoEvento"].S,
-                        IdOrdemServico: imagem["idOrdemServico"].S,
-                        Payload: payload.S);
+                        IdOrdemServico: idOrdemServico,
+                        Payload: payload.S,
+                        CorrelationId: correlationId);
 
-                    await publisher.Publicar(evento);
-                    logger.LogInformation("Evento {TipoEvento} {IdEvento} da OS {IdOrdemServico} publicado no SNS",
-                        evento.TipoEvento, evento.IdEvento, evento.IdOrdemServico);
+                    using (CorrelationContext.Push(correlationId))
+                    using (logger.BeginScope(new Dictionary<string, object>
+                    {
+                        [CorrelationContext.LogScopeKey] = correlationId,
+                        [CorrelationContext.OsIdScopeKey] = idOrdemServico
+                    }))
+                    {
+                        await publisher.Publicar(evento);
+                        logger.LogInformation("Evento {TipoEvento} {IdEvento} da OS {IdOrdemServico} publicado no SNS (CorrelationId: {CorrelationId})",
+                            evento.TipoEvento, evento.IdEvento, evento.IdOrdemServico, correlationId);
+                    }
                 }
                 catch (Exception ex)
                 {

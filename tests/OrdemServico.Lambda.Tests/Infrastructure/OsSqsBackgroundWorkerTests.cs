@@ -311,5 +311,51 @@ namespace OrdemServico.Lambda.Tests.Infrastructure
             _estoqueMock.Verify(e => e.EstornarEstoque(idPeca, 1), Times.Once);
             _repoMock.Verify(r => r.Atualizar(os), Times.Once);
         }
+
+        [Fact]
+        public async Task ProcessarMensagem_ComCorrelationIdNoEnvelope_DevePropagarParaSnsECoreApiAuthorization()
+        {
+            var worker = CriarWorker();
+            var os = new OrdemServicoEntity(Guid.NewGuid(), Guid.NewGuid(), "Cliente Teste", "cliente@email.com");
+            os.SincronizarItens([new ItemServico(Guid.NewGuid(), "Revisão", 200m, 90)], []);
+            os.AlterarStatus(StatusOS.AguardandoAprovacao);
+            _repoMock.Setup(r => r.ObterPorId(os.Id)).ReturnsAsync(os);
+
+            string? correlationDurantePublicacao = null;
+            _snsMock.Setup(s => s.PublishAsync(It.IsAny<PublishRequest>(), It.IsAny<CancellationToken>()))
+                .Callback<PublishRequest, CancellationToken>((_, _) =>
+                {
+                    var auth = new OrdemServico.Lambda.Infrastructure.Http.CoreApiAuthorization(
+                        new Microsoft.AspNetCore.Http.HttpContextAccessor(),
+                        new Lazy<OrdemServico.Lambda.Infrastructure.Security.ServiceTokenFactory>(
+                            () => new OrdemServico.Lambda.Infrastructure.Security.ServiceTokenFactory(
+                                new OrdemServico.Lambda.Infrastructure.Security.JwtSettings("12345678901234567890123456789012", "TechChallenge", "techchallenge.com.br"))));
+                    correlationDurantePublicacao = auth.ObterCorrelationId();
+                })
+                .ReturnsAsync(new PublishResponse());
+
+            var evento = new PagamentoConfirmadoEvent
+            {
+                OsId = os.Id,
+                PagamentoId = Guid.NewGuid(),
+                Valor = 200m,
+                XCorrelationId = "corr-fluxo-completo-999"
+            };
+
+            var msg = CriarMensagemSqs("PagamentoConfirmadoEvent", evento);
+            msg.MessageAttributes[SnsMessageAttributes.CorrelationId] = new SqsMessageAttributeValue
+            {
+                DataType = "String",
+                StringValue = "corr-fluxo-completo-999"
+            };
+
+            await worker.ProcessarMensagemAsync(msg, CancellationToken.None);
+
+            correlationDurantePublicacao.Should().Be("corr-fluxo-completo-999");
+            _snsMock.Verify(s => s.PublishAsync(It.Is<PublishRequest>(req =>
+                req.MessageAttributes.ContainsKey(SnsMessageAttributes.CorrelationId) &&
+                req.MessageAttributes[SnsMessageAttributes.CorrelationId].StringValue == "corr-fluxo-completo-999"),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
     }
 }

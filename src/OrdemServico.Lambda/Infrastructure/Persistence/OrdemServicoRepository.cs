@@ -141,16 +141,24 @@ namespace OrdemServico.Lambda.Infrastructure.Persistence
             return DoMapa<OrdemServicoDocumento>(item[Dados]).ParaDominio(versao);
         }
 
-        private static Dictionary<string, AttributeValue> ParaItemOutbox(EventoDominio evento) => new()
+        private static Dictionary<string, AttributeValue> ParaItemOutbox(EventoDominio evento)
         {
-            [PK] = S($"OUTBOX#{evento.IdEvento}"),
-            [SK] = S("OUTBOX"),
-            [TipoEntidade] = S("OUTBOX"),
-            ["tipoEvento"] = S(evento.TipoEvento),
-            ["idOrdemServico"] = S(evento.IdOrdemServico.ToString()),
-            ["ocorridoEm"] = S(evento.OcorridoEm.ToString("O")),
-            ["payload"] = S(JsonSerializer.Serialize(evento, evento.GetType(), JsonDefaults.Options)),
-            [ExpiraEm] = Ttl(RetencaoOutbox)
-        };
+            string correlationId = !string.IsNullOrWhiteSpace(evento.CorrelationId)
+                ? evento.CorrelationId
+                : Fiap.TechChallenge.Contracts.Common.CorrelationContext.Resolve(fallback: evento.IdOrdemServico.ToString());
+
+            return new()
+            {
+                [PK] = S($"OUTBOX#{evento.IdEvento}"),
+                [SK] = S("OUTBOX"),
+                [TipoEntidade] = S("OUTBOX"),
+                ["tipoEvento"] = S(evento.TipoEvento),
+                ["idOrdemServico"] = S(evento.IdOrdemServico.ToString()),
+                ["correlationId"] = S(correlationId),
+                ["ocorridoEm"] = S(evento.OcorridoEm.ToString("O")),
+                ["payload"] = S(JsonSerializer.Serialize(evento, evento.GetType(), JsonDefaults.Options)),
+                [ExpiraEm] = Ttl(RetencaoOutbox)
+            };
+        }
     }
 }

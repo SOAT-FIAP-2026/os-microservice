@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.SQSEvents;
+using Fiap.TechChallenge.Contracts.Common;
 using Fiap.TechChallenge.Contracts.OsService;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -37,19 +38,49 @@ namespace OrdemServico.Lambda.Functions
 
             foreach (SQSEvent.SQSMessage mensagem in sqsEvent.Records)
             {
-                try
-                {
-                    ComandoCompensacao comando = JsonSerializer.Deserialize<ComandoCompensacao>(mensagem.Body, JsonDefaults.Options)
-                        ?? throw new JsonException("Mensagem de compensação vazia.");
-                    Validar(comando, mensagem.Body);
+                var sqsAttributes = mensagem.MessageAttributes?.ToDictionary(
+                    k => k.Key,
+                    v => v.Value?.StringValue,
+                    StringComparer.OrdinalIgnoreCase);
 
-                    using IServiceScope scope = _serviceProvider.CreateScope();
-                    await scope.ServiceProvider.GetRequiredService<CompensacaoService>().Executar(comando, "sqs");
-                }
-                catch (Exception ex)
+                string correlationId = SnsCorrelationHelper.ExtractCorrelationId(
+                    mensagem.Body,
+                    sqsAttributes,
+                    fallbackId: mensagem.MessageId);
+
+                using (CorrelationContext.Push(correlationId))
+                using (logger.BeginScope(new Dictionary<string, object>
                 {
-                    logger.LogError(ex, "Falha ao processar a mensagem de compensação {MessageId}", mensagem.MessageId);
-                    falhas.Add(new SQSBatchResponse.BatchItemFailure { ItemIdentifier = mensagem.MessageId });
+                    [CorrelationContext.LogScopeKey] = correlationId
+                }))
+                {
+                    try
+                    {
+                        ComandoCompensacao comando = JsonSerializer.Deserialize<ComandoCompensacao>(mensagem.Body, JsonDefaults.Options)
+                            ?? throw new JsonException("Mensagem de compensação vazia.");
+                        Validar(comando, mensagem.Body);
+
+                        string effectiveCorrId = !string.IsNullOrWhiteSpace(comando.CorrelationId)
+                            ? comando.CorrelationId
+                            : correlationId;
+
+                        using (CorrelationContext.Push(effectiveCorrId))
+                        using (logger.BeginScope(new Dictionary<string, object>
+                        {
+                            [CorrelationContext.LogScopeKey] = effectiveCorrId,
+                            [CorrelationContext.OsIdScopeKey] = comando.IdOrdemServico
+                        }))
+                        {
+                            using IServiceScope scope = _serviceProvider.CreateScope();
+                            await scope.ServiceProvider.GetRequiredService<CompensacaoService>().Executar(comando, "sqs");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Falha ao processar a mensagem de compensação {MessageId} (CorrelationId: {CorrelationId})",
+                            mensagem.MessageId, correlationId);
+                        falhas.Add(new SQSBatchResponse.BatchItemFailure { ItemIdentifier = mensagem.MessageId });
+                    }
                 }
             }
 
