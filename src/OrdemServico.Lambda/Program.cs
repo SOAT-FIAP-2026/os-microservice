@@ -3,6 +3,10 @@ using Amazon.Lambda.Serialization.SystemTextJson;
 using Amazon.SimpleSystemsManagement;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using OrdemServico.Lambda.Api;
 using OrdemServico.Lambda.Configuration;
 using OrdemServico.Lambda.Infrastructure.Security;
@@ -14,7 +18,58 @@ using OrdemServico.Lambda.Infrastructure.Security;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Logging.ClearProviders();
-builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
+builder.Logging.AddJsonConsole(options =>
+{
+    options.IncludeScopes = true;
+    options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
+    options.UseUtcTimestamp = true;
+});
+
+string serviceName = builder.Configuration["OTEL_SERVICE_NAME"]
+    ?? builder.Configuration["Observability:ServiceName"]
+    ?? "techchallenge-os-service";
+string? otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+
+if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+{
+    builder.Logging.AddOpenTelemetry(options =>
+    {
+        options.IncludeScopes = true;
+        options.IncludeFormattedMessage = true;
+        options.ParseStateValues = true;
+        options.AddOtlpExporter();
+    });
+}
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource
+        .AddService(
+            serviceName: serviceName,
+            serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString(),
+            serviceInstanceId: Environment.MachineName)
+        .AddAttributes([
+            new KeyValuePair<string, object>("service.namespace", "techchallenge")
+        ]))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation();
+
+        if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            tracing.AddOtlpExporter();
+    })
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddRuntimeInstrumentation()
+            .AddPrometheusExporter();
+
+        if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            metrics.AddOtlpExporter();
+    });
 
 builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
 builder.Services.AddOrdemServicoLambda(builder.Configuration);
@@ -62,6 +117,13 @@ app.MapGet("/api/v1/ordens-servico/health", () => Results.Ok(new { status = "Hea
     .WithTags("Health")
     .WithSummary("Health check do microsserviço de Ordem de Serviço")
     .Produces(StatusCodes.Status200OK);
+app.MapGet("/health", () => Results.Ok(new { status = "Healthy" }))
+    .ExcludeFromDescription();
+app.MapGet("/health/live", () => Results.Ok(new { status = "Healthy" }))
+    .ExcludeFromDescription();
+app.MapGet("/health/ready", () => Results.Ok(new { status = "Healthy" }))
+    .ExcludeFromDescription();
+app.MapPrometheusScrapingEndpoint("/metrics");
 app.MapOrdemServicoEndpoints();
 
 app.Run();
