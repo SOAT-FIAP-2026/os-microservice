@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: os-microservice-config
+  namespace: techchallenge
+  labels:
+    app.kubernetes.io/name: os-microservice
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: techchallenge
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  ASPNETCORE_URLS: "http://+:8080"
+  AWS_REGION: "sa-east-1"
+  TABLE_NAME: "techchallenge-ordem-servico-prod"
+  CORE_API_BASE_URL: "http://core-service.techchallenge.svc.cluster.local:8080"
+  OS_EVENTOS_QUEUE_URL: "https://sqs.sa-east-1.amazonaws.com/000000000000/techchallenge-os-eventos-prod"
+  COMPENSACAO_QUEUE_URL: "https://sqs.sa-east-1.amazonaws.com/000000000000/techchallenge-ordem-servico-compensacao-prod"
+  EVENTOS_TOPIC_ARN: "arn:aws:sns:sa-east-1:000000000000:techchallenge-eventos-prod"
+  EVENTO_ORIGEM: "techchallenge.ordem-servico"
+  JWT_ISSUER: "TechChallenge"
+  JWT_AUDIENCE: "techchallenge.com.br"
+  JWT_SECRET_SSM_PARAMETER: "/techchallenge/prod/jwt_secret"
+  OTEL_SERVICE_NAME: "techchallenge-os-service"
+
