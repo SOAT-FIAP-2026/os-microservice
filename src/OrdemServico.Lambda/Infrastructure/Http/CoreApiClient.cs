@@ -21,7 +21,7 @@ namespace OrdemServico.Lambda.Infrastructure.Http
         public async Task<ClienteResumo?> ObterCliente(Guid idCliente)
         {
             ClienteCatalogoDto? cliente = await Obter<ClienteCatalogoDto>(string.Format(CoreApiRoutes.ObterClientePorId, idCliente));
-            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Telefone ?? cliente.Celular);
+            return cliente == null ? null : new ClienteResumo(cliente.Id, cliente.Nome, cliente.Email, cliente.Celular);
         }
 
         public async Task<bool> VeiculoExiste(Guid idVeiculo)
