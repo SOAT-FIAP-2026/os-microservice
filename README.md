@@ -160,16 +160,47 @@ O `GET /ordens-servico` consulta o GSI1 com `ORDEM_SERVICO#ATIVA`, o mesmo filtr
 
 ## Deploy
 
+### 1. AWS Lambda + CloudFormation
+
 Pré-requisitos: AWS CLI autenticada, .NET 8 SDK e o parâmetro SSM da chave JWT já existente (é o mesmo do EKS).
 
 ```bash
-cd lambda-ordem-servico
+cd os-microservice
 ./scripts/deploy.sh                                  # descobre o ALB da API core automaticamente
 CORE_API_BASE_URL=http://meu-alb... ./scripts/deploy.sh
 RESEND_SSM_PARAM=/techchallenge/prod/resend_api_key ./scripts/deploy.sh
 ```
 
 O script roda os testes, faz `dotnet publish` para `linux-arm64`, envia o zip ao S3 e aplica `infra/template.yaml` via `aws cloudformation deploy`.
+
+### 2. Container / Kubernetes (EKS via Kustomize)
+
+Além do empacotamento serverless via CloudFormation, o serviço também é empacotado como container ASP.NET Core (porta `8080`, usuário non-root `$APP_UID` em [`Dockerfile`](Dockerfile)) e publicado no GHCR (`ghcr.io/soat-fiap-2026/os-microservice:latest`) pelo workflow [`.github/workflows/cd.yml`](.github/workflows/cd.yml).
+
+Os manifestos Kubernetes em [`k8s/base/`](k8s/base/kustomization.yaml) provisionam:
+
+- [`configmap.yaml`](k8s/base/configmap.yaml) (`os-microservice-config`): configura `TABLE_NAME`, `CORE_API_BASE_URL`, `OS_EVENTOS_QUEUE_URL`, `COMPENSACAO_QUEUE_URL`, `EVENTOS_TOPIC_ARN`, `EVENTO_ORIGEM`, `AWS_REGION`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_SECRET_SSM_PARAMETER` e `OTEL_SERVICE_NAME`.
+- [`deployment.yaml`](k8s/base/deployment.yaml) (`os-microservice`): `Deployment` non-root com `livenessProbe` e `readinessProbe` em `/api/v1/ordens-servico/health` (porta `8080`), secret opcional `os-microservice-secrets` (`JWT_SECRET`) e fallback via AWS SSM Parameter Store. Também expõe `/health`, `/health/live`, `/health/ready` e `/metrics` (Prometheus).
+- [`service.yaml`](k8s/base/service.yaml) (`os-microservice`): `ClusterIP` expondo a porta `8080`.
+
+Para subir o ecossistema completo localmente em containers (com DynamoDB, SNS, SQS e SSM simulados via Floci, API disponível em `http://localhost:8083`):
+
+```bash
+docker compose -f ../shared/docker-compose.yml up -d --build
+```
+
+### 3. Consumo assíncrono em container: `OsSqsBackgroundWorker`
+
+O [`OsSqsBackgroundWorker`](src/OrdemServico.Lambda/Infrastructure/Messaging/OsSqsBackgroundWorker.cs) é registrado via [`DependencyInjection.cs`](src/OrdemServico.Lambda/Configuration/DependencyInjection.cs) como `BackgroundService` para viabilizar o consumo de eventos da Saga tanto no modo container/Kubernetes quanto no modo AWS Lambda:
+
+- **Detecção automática de ambiente:** se a variável `AWS_LAMBDA_FUNCTION_NAME` estiver definida, o worker encerra o loop imediatamente, mantendo o consumo via triggers nativos da AWS Lambda (`CompensacaoEventoFunction`, `CompensacaoFilaFunction`, `OutboxPublisherFunction`).
+- **Polling SQS em modo container/K8s:** quando fora do ambiente Lambda, realiza long-polling na fila configurada em `OS_EVENTOS_QUEUE_URL` (ou `OS_QUEUE_URL` / `Aws:OsEventosQueueUrl`), propaga `X-Correlation-ID` e `idOrdemServico` via `SnsCorrelationHelper` / `CorrelationContext` e processa os eventos:
+  - `DiagnosticoIniciadoEvent` → avança a OS para `EM_DIAGNOSTICO`.
+  - `DiagnosticoTecnicoConcluidoEvent` → sincroniza itens sugeridos e avança a OS para `AGUARDANDO_APROVACAO`.
+  - `OrcamentoGeradoEvent` → atualiza `ValorOrcamento` e avança a OS para `AGUARDANDO_APROVACAO`.
+  - `PagamentoConfirmadoEvent` → avança a OS para `ORCAMENTO_APROVADO` e publica `OrdemServicoLiberadaParaExecucaoEvent` no SNS (`SnsPublisher`).
+  - `ProducaoIniciadaEvent` e `ProducaoFinalizadaEvent` → atualizam itens/status da OS para `EM_EXECUCAO` e `FINALIZADA`.
+  - Eventos de compensação (`PagamentoCanceladoCompensacaoEvent`, `PagamentoRecusadoEvent`, `ProducaoCanceladaEvent`, `OrcamentoReprovado`, `OrdemServicoCanceladaEvent`) → acionam `CompensacaoService` (`CancelarOrdemServico`) com chave idempotente `sqs-<eventId>`.
 
 Testar as compensações manualmente:
 
@@ -181,11 +212,35 @@ aws sns publish --topic-arn <EventosTopicArn> --cli-input-json file://events/sns
 aws sns publish --topic-arn <EventosTopicArn> --cli-input-json file://events/sns-pagamento-recusado.json
 ```
 
-Desenvolvimento local:
+## Evidências de Testes e Cobertura de Código (≥ 80%)
+
+### Resultados verificados
+
+Execução validada com [`coverlet.runsettings`](coverlet.runsettings) (excluindo `[*Tests*]*`, `[Fiap.TechChallenge.Contracts]*` e `**/Migrations/*.cs`) sobre o projeto [`OrdemServico.Lambda.Tests`](tests/OrdemServico.Lambda.Tests/OrdemServico.Lambda.Tests.csproj):
+
+| Métrica | Valor observado |
+|---|---|
+| **Testes executados** | **103** (`Passed: 103`, `Failed: 0`, `Skipped: 0`) |
+| **Cobertura de linhas (`line-rate`)** | **87,73%** (`0.8773` — `1795` de `2046` linhas válidas cobertas) |
+| **Cobertura de branches (`branch-rate`)** | **74,67%** (`0.7467` — `625` de `837` branches cobertos) |
+
+### Comandos para reprodução local
 
 ```bash
-dotnet test OrdemServico.Lambda.sln
+dotnet build src/OrdemServico.Lambda/OrdemServico.Lambda.csproj --configuration Release
+dotnet build tests/OrdemServico.Lambda.Tests/OrdemServico.Lambda.Tests.csproj --configuration Release
+dotnet test tests/OrdemServico.Lambda.Tests/OrdemServico.Lambda.Tests.csproj \
+  --configuration Release \
+  --no-build \
+  --settings coverlet.runsettings \
+  --collect:"XPlat Code Coverage" \
+  --results-directory /tmp/os-test-results
 ```
+
+### Qualidade contínua (CI/CD e SonarCloud)
+
+- **SonarCloud:** workflow [`.github/workflows/sonar.yml`](.github/workflows/sonar.yml) analisa o projeto `SOAT-FIAP-2026_os-microservice` (organização `soat-fiap-2026`), enviando `TestResults/**/coverage.opencover.xml`.
+- **CI / CD:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa build, testes com cobertura e validação do build Docker; [`.github/workflows/cd.yml`](.github/workflows/cd.yml) publica a imagem container em `ghcr.io/soat-fiap-2026/os-microservice`.
 
 ## Diferenças em relação ao monólito
 
